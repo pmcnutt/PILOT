@@ -1,0 +1,36 @@
+"in.W_110_template" 35L, 878C                                                                                                                                                                                                                                                                1,1           All
+app_style        3SBCC core_energy 1 setup screw
+fft_style       fftw_slab pbc 1 1 1 mode 1 primitive x 1 1 -1 y -1 1 1 z 1 -1 1 #bcc nonortho
+seed            500
+
+dimension        3
+lattice         sc/6n 1
+region box block 0 128 0 128 0 128
+
+num_interstitial 3
+interstitial nb_interstitial
+concentration 0.00
+
+dislocation_mobility 0.25
+interstitial_mobility 0
+
+create_box       box
+create_sites     box
+material         preset W110_MITCH dAdc 0.0 0.0 0.0 aflag 2
+solve_style GL max_iter 20000 tol 0.0001 int_tol 0.0 relax_before_run 1 freeze_after_relax 1
+
+gflag           0
+blur_stress     1
+temperature     0
+
+diag_style      strain
+diag_style      stress
+
+scale           1 1 1
+
+sigma     initial 0.000000 0.000000 -0.000000 0.000000 0.000000 0.000000 delta 0.0 0.0 0.0 0.0 0.0 0.0
+stats           1.0e-8
+
+dump x text 10000 DUMPFILE_PLACEHOLDER x y z xir1 xir2 xir3
+
+run 1

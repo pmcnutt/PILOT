@@ -1,0 +1,197 @@
+#!/usr/bin/env python3
+"""
+crss_search.py -- bisection search for CRSS vs temperature, driving PFDD job arrays.
+
+Workflow (repeat generate -> sbatch -> update for N_ROUNDS rounds):
+
+    python3 crss_search.py init        # create search_state.json (fresh search)
+    python3 crss_search.py generate    # write cases_W_110.txt for this round
+    sbatch --array=0-14 W_110_jobs     # (generate prints the exact command)
+    ... wait for jobs to finish ...
+    python3 crss_search.py update      # record moved/not-moved, halve brackets
+    python3 crss_search.py report      # show current brackets / CRSS estimates
+
+Marking results: implement did_dislocation_move() below to parse your dump
+files automatically; until then, `update` prompts you for m/n per temperature.
+"""
+
+import json
+import math
+import os
+import random
+import sys
+
+# ----------------------------- configuration -----------------------------
+
+TEMPS = list(range(0, 1401, 100))     # 0, 100, ..., 1400 K
+TAU_LO, TAU_HI = 0.0, 0.08            # initial CRSS bracket, units of mu
+N_ROUNDS = 6                          # bisection iterations
+CHI_DEG = 0.0                         # MRSSP angle: 0 -> (110)
+SEED_MIN, SEED_MAX = 1, 1000          # random seed range per generated case
+
+STATE_FILE = "search_state.json"
+CASES_FILE = "cases_W_110.txt"
+OUT_BASE = "/home/OUTPUT/W"
+DUMP_NAME = "W_screw_110_{T}K_{tag}.dump"   # must match the SLURM script's naming
+
+# ---------------------- stress line (from your GUI) ----------------------
+
+def stress_components(tau0, chi_deg):
+    """sigma = tau0 (b (x) m + m (x) b), b || [-1 1 1], m = (110) normal
+    rotated by chi about b (positive toward b x n110).
+    Returns (sxx, syy, szz, sxy, sxz, syz) -- same convention as the GUI."""
+    try:
+        # Prefer your own module if it's importable (same dir / PYTHONPATH)
+        import pfdd_mrssp_gui as gui
+        gui.state["tau0"] = tau0
+        S = gui.stress_tensor(chi_deg=chi_deg)
+        return (S[0][0], S[1][1], S[2][2], S[0][1], S[0][2], S[1][2])
+    except ImportError:
+        pass
+    # Fallback: same math, self-contained
+    b = [v / math.sqrt(3.0) for v in (-1.0, 1.0, 1.0)]
+    n = [v / math.sqrt(2.0) for v in (1.0, 1.0, 0.0)]          # (110) normal
+    bxn = (b[1]*n[2]-b[2]*n[1], b[2]*n[0]-b[0]*n[2], b[0]*n[1]-b[1]*n[0])
+    c, s = math.cos(math.radians(chi_deg)), math.sin(math.radians(chi_deg))
+    m = [c*n[i] + s*bxn[i] for i in range(3)]
+    S = [[tau0*(b[i]*m[j] + m[i]*b[j]) for j in range(3)] for i in range(3)]
+    return (S[0][0], S[1][1], S[2][2], S[0][1], S[0][2], S[1][2])
+
+
+def tau_str(tau):
+    return f"{tau:.6f}".rstrip("0").rstrip(".") or "0"
+
+
+def tau_tag(tau):
+    return tau_str(tau).replace(".", "p").replace("-", "m")
+
+
+def sigma_line(tau, chi_deg):
+    c = stress_components(tau, chi_deg)
+    comps = " ".join(f"{x:.6f}" for x in c)
+    return (f"sigma     initial {comps} "
+            f"delta 0.000000 0.000000 0.000000 0.000000 0.000000 0.000000 "
+            f"#tau {tau_str(tau)} chi {chi_deg:+g} deg")
+
+# --------------------------- result detection ----------------------------
+
+def did_dislocation_move(dumpfile):
+    """Return True if the dislocation moved in this run, False if not.
+
+    TODO: implement using your dump format, e.g. locate the dislocation from
+    the xir disregistry fields and compare its position to the initial one.
+    Until implemented, `update` falls back to asking you interactively.
+    """
+    raise NotImplementedError
+
+# ------------------------------ state I/O --------------------------------
+
+def load_state():
+    if not os.path.exists(STATE_FILE):
+        sys.exit(f"No {STATE_FILE} found -- run: python3 {sys.argv[0]} init")
+    with open(STATE_FILE) as f:
+        return json.load(f)
+
+
+def save_state(state):
+    with open(STATE_FILE, "w") as f:
+        json.dump(state, f, indent=2)
+
+# ------------------------------- commands --------------------------------
+
+def cmd_init():
+    if os.path.exists(STATE_FILE):
+        sys.exit(f"{STATE_FILE} already exists -- delete it to restart the search.")
+    state = {
+        "round": 0,
+        "chi_deg": CHI_DEG,
+        "temps": {str(T): {"lo": TAU_LO, "hi": TAU_HI, "history": []} for T in TEMPS},
+    }
+    save_state(state)
+    print(f"Initialized search: {len(TEMPS)} temperatures, bracket "
+          f"[{TAU_LO}, {TAU_HI}] mu, {N_ROUNDS} rounds planned.")
+    print(f"Next: python3 {sys.argv[0]} generate")
+
+
+def cmd_generate():
+    state = load_state()
+    for T, d in state["temps"].items():
+        if d["history"] and "moved" not in d["history"][-1]:
+            sys.exit(f"T={T}K has an unrecorded result from round {state['round']} "
+                     f"-- run `update` first.")
+    if state["round"] >= N_ROUNDS:
+        print(f"Already completed {N_ROUNDS} rounds. See `report`.")
+        return
+
+    state["round"] += 1
+    lines = [f"# Round {state['round']} of {N_ROUNDS} -- generated by crss_search.py",
+             "# <T_K>  <seed>  <sigma line>"]
+    for T, d in state["temps"].items():
+        tau = 0.5 * (d["lo"] + d["hi"])
+        seed = random.randint(SEED_MIN, SEED_MAX)
+        tag = tau_tag(tau)
+        dump = os.path.join(OUT_BASE, f"{T}K", DUMP_NAME.format(T=T, tag=tag))
+        d["history"].append({"round": state["round"], "tau": tau,
+                             "seed": seed, "dump": dump})
+        lines.append(f"{T}  {seed}  {sigma_line(tau, state['chi_deg'])}")
+
+    with open(CASES_FILE, "w") as f:
+        f.write("\n".join(lines) + "\n")
+    save_state(state)
+
+    n = len(state["temps"])
+    print(f"Round {state['round']}: wrote {n} cases to {CASES_FILE}")
+    print(f"Submit with:\n  sbatch --array=0-{n-1} W_110_jobs")
+    print(f"When all jobs finish: python3 {sys.argv[0]} update")
+
+
+def cmd_update():
+    state = load_state()
+    pending = [(T, d) for T, d in state["temps"].items()
+               if d["history"] and "moved" not in d["history"][-1]]
+    if not pending:
+        sys.exit("No pending results. Run `generate` to start the next round.")
+
+    for T, d in sorted(pending, key=lambda x: int(x[0])):
+        run = d["history"][-1]
+        try:
+            moved = did_dislocation_move(run["dump"])
+            print(f"T={T}K  tau={tau_str(run['tau'])}  -> "
+                  f"{'MOVED' if moved else 'did not move'} (auto)")
+        except NotImplementedError:
+            ans = ""
+            while ans not in ("m", "n"):
+                ans = input(f"T={T}K  tau={tau_str(run['tau'])}  "
+                            f"[{run['dump']}]\n  moved? (m/n): ").strip().lower()
+            moved = (ans == "m")
+        run["moved"] = moved
+        if moved:
+            d["hi"] = run["tau"]     # CRSS is at or below this tau
+        else:
+            d["lo"] = run["tau"]     # CRSS is above this tau
+
+    save_state(state)
+    if state["round"] >= N_ROUNDS:
+        print(f"\nSearch complete ({N_ROUNDS} rounds).")
+        cmd_report()
+    else:
+        print(f"\nBrackets updated. Next: python3 {sys.argv[0]} generate")
+
+
+def cmd_report():
+    state = load_state()
+    print(f"\nRound {state['round']} / {N_ROUNDS}   chi = {state['chi_deg']:+g} deg")
+    print(f"{'T (K)':>7} {'lo (mu)':>10} {'hi (mu)':>10} {'CRSS est.':>11} {'+/-':>9}")
+    for T in sorted(state["temps"], key=int):
+        d = state["temps"][T]
+        mid = 0.5 * (d["lo"] + d["hi"])
+        half = 0.5 * (d["hi"] - d["lo"])
+        print(f"{T:>7} {d['lo']:>10.6f} {d['hi']:>10.6f} {mid:>11.6f} {half:>9.6f}")
+
+
+if __name__ == "__main__":
+    cmds = {"init": cmd_init, "generate": cmd_generate,
+            "update": cmd_update, "report": cmd_report}
+    if len(sys.argv) != 2 or sys.argv[1] not in cmds:
+        sys.exit(f"Usage: python3 {sys.argv[0]} {{init|generate|update|report}}")
+    cmds[sys.argv[1]]()
