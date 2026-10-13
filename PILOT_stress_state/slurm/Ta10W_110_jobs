@@ -1,0 +1,116 @@
+#!/bin/bash
+#SBATCH --job-name=Ta10W_110
+#SBATCH --account=ACCOUNT        # EDIT: your SLURM account
+#SBATCH --partition=PARTITION      # EDIT: your partition
+#SBATCH --time=48:00:00
+#SBATCH --nodes=1
+#SBATCH --ntasks-per-node=8
+#SBATCH --ntasks=8
+#SBATCH --signal=TERM@300
+#SBATCH --array=0-14
+#SBATCH -o $SCRATCH/OUTPUT/logs/xslip_study/Ta10W/110_slip/110/%x.%A_%a.out
+#SBATCH -e $SCRATCH/OUTPUT/logs/xslip_study/Ta10W/110_slip/110/%x.%A_%a.err
+
+#
+# NOTE: sanitized for sharing. Set your own cluster specifics below:
+#   - SBATCH --account / --partition / -o / -e paths
+#   - SCRATCH (scratch root), CODE_SRC, module versions
+# The array logic, cases parsing and sed substitutions are unchanged.
+#
+module purge
+module load intel/21.3.0
+module load openmpi-intel/4.1
+
+export OMP_NUM_THREADS=1
+export LD_LIBRARY_PATH="$HOME/fftw/lib:$LD_LIBRARY_PATH"
+ulimit -s unlimited
+
+set -euo pipefail
+
+SCRATCH="${SCRATCH:-$HOME/scratch}"   # EDIT: your scratch root
+
+# ---------- Paths ----------
+CODE_SRC="$HOME/pfdd/src"
+SUBMIT_DIR="$SCRATCH/xslip_study/Ta10W/110_slip/110/run1"
+USFE_DIR="$SCRATCH/xslip_study/Ta10W/USFE_FILES/USFE_110_r1"
+DUMP_BASE="$SCRATCH/OUTPUT/dumps/xslip_study/Ta10W/110_slip/110"
+LOG_BASE="$SCRATCH/OUTPUT/logs/xslip_study/Ta10W/110_slip/110"
+
+EXE="$CODE_SRC/pfdd_openmpi"
+IN_TEMPLATE="in.Ta10W_110_template"
+CASES_FILE="cases_Ta10W_110.txt"
+
+cd "$SUBMIT_DIR"
+
+# nb_interstitial is referenced by bare name inside the input file, so it must be
+# in the working dir. Copy only if missing so concurrent array tasks don't clobber
+# it while another task is reading it.
+[ -f ./nb_interstitial ] || cp -f "$CODE_SRC/nb_interstitial" .
+
+# ---------- Pick this task's case line ----------
+mapfile -t CASES < <(grep -vE '^[[:space:]]*(#|$)' "$CASES_FILE")
+NCASES=${#CASES[@]}
+if [ "$SLURM_ARRAY_TASK_ID" -ge "$NCASES" ]; then
+    echo "ERROR: array index $SLURM_ARRAY_TASK_ID >= number of cases ($NCASES)" >&2
+    exit 1
+fi
+CASE="${CASES[$SLURM_ARRAY_TASK_ID]}"
+
+T=$(echo "$CASE" | awk '{print $1}')
+SEED=$(echo "$CASE" | awk '{print $2}')
+USFE_FILE=$(echo "$CASE" | awk '{print $3}')
+SIGMA_LINE=$(echo "$CASE" | awk '{$1=""; $2=""; $3=""; sub(/^ +/,""); print}')
+
+# ---------- On exit, move SLURM .out/.err into the per-temperature log folder ----------
+move_logs() {
+    local dest="${LOG_BASE}/${T}K"
+    mkdir -p "$dest"
+    local base="${SLURM_JOB_NAME}.${SLURM_ARRAY_JOB_ID}_${SLURM_ARRAY_TASK_ID}"
+    mv -f "${LOG_BASE}/${base}.out" "${dest}/" 2>/dev/null || true
+    mv -f "${LOG_BASE}/${base}.err" "${dest}/" 2>/dev/null || true
+}
+trap move_logs EXIT
+
+# ---------- Validate ----------
+if ! [[ "$SEED" =~ ^[0-9]+$ ]]; then
+    echo "ERROR: seed field is not an integer: $CASE" >&2; exit 1
+fi
+if [ -z "$USFE_FILE" ]; then
+    echo "ERROR: USFE field is empty: $CASE" >&2; exit 1
+fi
+
+TAU=$(echo "$SIGMA_LINE" | sed -n 's/.*#tau[[:space:]]*\([0-9.eE+-]*\).*/\1/p')
+if [ -z "$TAU" ]; then
+    echo "ERROR: could not parse '#tau <value>' from sigma line: $SIGMA_LINE" >&2; exit 1
+fi
+TAU_TAG="${TAU//./p}"     # 0.04 -> 0p04
+
+echo "Array task $SLURM_ARRAY_TASK_ID / job $SLURM_ARRAY_JOB_ID"
+echo "T=${T}K  tau=${TAU}  seed=${SEED}  USFE=${USFE_FILE}"
+echo "START $(date) on $(hostname)"
+
+# ---------- Build this case's input file ----------
+DUMP_DIR="${DUMP_BASE}/${T}K"
+mkdir -p "$DUMP_DIR"
+
+INFILE="in.Ta10W_110_T${T}_${TAU_TAG}"
+DUMPFILE="${DUMP_DIR}/Ta10W_screw_110_${T}K_${TAU_TAG}.dump"
+USFE_PATH="${USFE_DIR}/${USFE_FILE}"
+
+sed \
+    -e "s/^temperature[[:space:]].*/temperature     ${T}/" \
+    -e "s/^seed[[:space:]].*/seed            ${SEED}/" \
+    -e "s|^sigma[[:space:]].*|${SIGMA_LINE}|" \
+    -e "s#DUMPFILE_PLACEHOLDER#${DUMPFILE}#" \
+    -e "s#USFEFILE_PLACEHOLDER#${USFE_PATH}#" \
+    "$IN_TEMPLATE" > "$INFILE"
+
+echo "Input file: $INFILE"
+echo "Dump file:  $DUMPFILE"
+echo "USFE file:  $USFE_PATH"
+
+# ---------- Run ----------
+srun -n "$SLURM_NTASKS" --cpu-bind=cores --label stdbuf -oL -eL \
+    "$EXE" -in "$INFILE"
+
+echo "END $(date)"

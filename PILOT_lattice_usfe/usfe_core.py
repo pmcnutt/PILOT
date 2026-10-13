@@ -1,19 +1,25 @@
 #!/usr/bin/env python3
 """
-usfe_core.py -- the actual work behind the USFE workflow (no GUI dependencies).
+usfe_core.py -- the work behind the PILOT USFE workflow (no GUI dependencies).
 
-One pass = OTIS builds a random SRO lattice, then an interp script maps local
-composition to USFE and writes <lattice>_usfe.  build_lattices() repeats that
-for however many lattices you ask for and records mean/std of each.
+One pass = lattice_generator builds a random solid-solution (RSS) lattice, then
+the matching interpolation script maps each site's local composition to a USFE
+value and writes <lattice>_usfe.  build_lattices() repeats that for as many
+lattices as you ask for and records the mean/std of each.
 
-This module is imported by usfe_workflow_gui.py; it has no tkinter import so it
-can be tested and reused on its own.
+Two things are now automatic, so the user cannot mismatch them:
+
+    lattice_type BCC              -> {110} interpolation (110_interp_usfe.py)
+    lattice_type CUSTOM_NON_ORTHO -> {112} interpolation (112_interp_usfe_nonbcc.py)
+
+Only random solid solutions are produced; there is no short-range-order option.
+
+This module has no tkinter import, so it can be tested and reused on its own.
 """
 
 import os
 import shutil
 import subprocess
-import sys
 import tempfile
 from dataclasses import dataclass, field
 from typing import Callable, List, Optional, Tuple
@@ -21,86 +27,86 @@ from typing import Callable, List, Optional, Tuple
 import numpy as np
 
 
+# lattice type -> (interpolation script, human-readable slip system)
+LATTICE_INTERP = {
+    "BCC":              ("110_interp_usfe.py",        "{110}"),
+    "CUSTOM_NON_ORTHO": ("112_interp_usfe_nonbcc.py", "{112}"),
+}
+
+
 # ------------------------------ configuration ----------------------------
 
 @dataclass
 class BuildConfig:
-    # --- lattice (OTIS) ---
-    lattice_type: str                      # BCC | FCC | CUSTOM
+    # --- lattice ---
+    lattice_type: str                      # BCC | CUSTOM_NON_ORTHO
     cell: Tuple[int, int, int]             # N1, N2, N3
     lattice_param: float                   # nearest-neighbour distance
     labels: List[str]                      # element names
     conc: List[float]                      # concentrations (need not pre-sum to 1)
-    input_type: str = "prob"               # prob | wc
-    matrix: Optional[List[List[float]]] = None   # components x components; None -> random
 
     # --- how many / naming ---
     n_lat: int = 1                         # number of lattices to build
     index_start: int = 0                   # first index value
     index_step: int = 1                    # step between index values
     usfe_pattern: str = "USFE_{i}"         # final USFE filename; must contain {i}
-    lattice_pattern: str = "lattice_{i}"   # OTIS lattice filename; must contain {i}
-    keep_lattices: bool = False
+    lattice_pattern: str = "lattice_{i}"   # lattice filename; must contain {i}
+    comp_pattern: str = "comp_{i}"         # composition filename; must contain {i}
+    keep_lattices: bool = True             # keep the RSS lattice files
+    keep_comp: bool = True                 # keep the per-site composition files
     out_dir: str = "."
 
     # --- interpolation ---
-    interp: str = "110_interp_usfe.py"
-    csv: str = "MoNbTi_sfe_data.csv"
+    csv: str = "MoNbTi_sfe_data.csv"       # SFE data; header names the elements
+    interp: str = ""                       # auto-set from lattice_type (see resolve)
 
     # --- tooling / misc ---
-    otis: str = "otis.py"
+    generator: str = "lattice_generator.py"
     usfe_col: int = 4
     usfe_skip_header: int = 1
     stats_file: str = "usfe_stats.csv"
-    interp_side_files: List[str] = field(default_factory=lambda: [
-        "monbti_110_comp_values.txt",
-        "monbti_112_1323K_comp_values.txt",
-    ])
 
     def indices(self) -> List[int]:
         return [self.index_start + self.index_step * n for n in range(self.n_lat)]
 
+    def slip_system(self) -> str:
+        return LATTICE_INTERP.get(self.lattice_type, ("", "?"))[1]
+
+    def resolve_interp(self) -> str:
+        """The interpolation script implied by the lattice type."""
+        if self.lattice_type in LATTICE_INTERP:
+            return LATTICE_INTERP[self.lattice_type][0]
+        return self.interp
+
 
 # ------------------------------ small helpers ----------------------------
 
-def build_otis_input_text(cfg: BuildConfig, out_name: str) -> str:
-    """Return the text of an OTIS input file for this config + output name."""
-    nc = len(cfg.labels)
-    if cfg.matrix is None:                       # random solid solution
-        s = sum(cfg.conc)
-        row = [c / s for c in cfg.conc]
-        matrix = [row[:] for _ in range(nc)]
-        input_type = "prob"
-    else:
-        matrix = cfg.matrix
-        input_type = cfg.input_type
-
+def build_generator_input_text(cfg: BuildConfig, out_name: str) -> str:
+    """Text of a lattice_generator input file for this config + output name."""
     N1, N2, N3 = cfg.cell
+    nc = len(cfg.labels)
     lines = [
-        f"{cfg.lattice_type} #lattice type (BCC, FCC, or CUSTOM)",
+        f"{cfg.lattice_type} #lattice type (BCC or CUSTOM_NON_ORTHO)",
         f"{N1} {N2} {N3} #number of primitive cells in each direction",
         f"{cfg.lattice_param} #distance between nearest neighbors",
         f"{nc} #number of elements",
         " ".join(cfg.labels) + " #names of elements",
         " ".join(f"{c:.8f}" for c in cfg.conc) + " #concentration of each element",
-        f"{input_type} #prob (pij) or wc (Warren-Cowley)",
+        f"{out_name} #output file name",
     ]
-    for r in matrix:
-        lines.append(" ".join(f"{v:.8f}" for v in r))
-    lines.append(f"{out_name} #output file name")
     return "\n".join(lines) + "\n"
 
 
 def usfe_stats(path: str, col: int, skip: int) -> Tuple[float, float, int]:
-    """Mean / std / N of the USFE column (same approach as avg_usfe.py)."""
+    """Mean / std / N of the USFE column."""
     data = np.genfromtxt(path, usecols=[col], skip_header=skip)
     return float(np.mean(data)), float(np.std(data)), int(data.size)
 
 
 def stream_process(cmd: List[str], emit: Callable[[str, bool], None]) -> None:
-    """Run cmd, forwarding output as it appears.  emit(text, is_status): is_status
-    is True for carriage-return progress updates (e.g. OTIS's bar), False for
-    completed lines.  Raises RuntimeError on nonzero exit."""
+    """Run cmd, forwarding output as it appears.  emit(text, is_status):
+    is_status True for carriage-return progress updates, False for finished
+    lines.  Raises RuntimeError on nonzero exit."""
     env = {**os.environ, "PYTHONUNBUFFERED": "1"}
     proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
                             text=True, env=env)
@@ -130,8 +136,8 @@ def stream_process(cmd: List[str], emit: Callable[[str, bool], None]) -> None:
 def validate(cfg: BuildConfig) -> List[str]:
     """Return a list of human-readable problems; empty list means OK."""
     errs = []
-    if cfg.lattice_type not in ("BCC", "FCC", "CUSTOM"):
-        errs.append("Lattice type must be BCC, FCC, or CUSTOM.")
+    if cfg.lattice_type not in LATTICE_INTERP:
+        errs.append("Lattice type must be BCC or CUSTOM_NON_ORTHO.")
     if any(int(x) <= 0 for x in cfg.cell):
         errs.append("Cell dimensions N1 N2 N3 must all be positive integers.")
     if len(cfg.labels) == 0:
@@ -142,27 +148,28 @@ def validate(cfg: BuildConfig) -> List[str]:
     if cfg.conc and abs(sum(cfg.conc) - 1.0) > 0.1:
         errs.append(f"Concentrations sum to {sum(cfg.conc):.3f}; must be ~1 "
                     f"(within 0.1). They are renormalised automatically.")
-    if cfg.matrix is not None:
-        nc = len(cfg.labels)
-        if len(cfg.matrix) != nc or any(len(r) != nc for r in cfg.matrix):
-            errs.append(f"SRO matrix must be {nc}x{nc} to match the elements.")
-        if cfg.input_type not in ("prob", "wc"):
-            errs.append("SRO input type must be 'prob' or 'wc'.")
     if cfg.n_lat <= 0:
         errs.append("Number of lattices must be at least 1.")
-    if "{i}" not in cfg.usfe_pattern:
-        errs.append("USFE naming pattern must contain '{i}'.")
-    if cfg.keep_lattices and "{i}" not in cfg.lattice_pattern:
-        errs.append("Lattice naming pattern must contain '{i}'.")
-    for label, p in (("OTIS script", cfg.otis), ("interp script", cfg.interp),
+    for label, pat in (("USFE", cfg.usfe_pattern),
+                       ("Lattice", cfg.lattice_pattern),
+                       ("Composition", cfg.comp_pattern)):
+        if "{i}" not in pat:
+            errs.append(f"{label} naming pattern must contain '{{i}}'.")
+    interp = cfg.resolve_interp()
+    for label, p in (("Lattice generator", cfg.generator),
+                     ("Interpolation script", interp),
                      ("CSV file", cfg.csv)):
-        if not os.path.exists(p):
+        if not p or not os.path.exists(p):
             errs.append(f"{label} not found: {p}")
     # naming collisions across the run
     idxs = cfg.indices()
-    names = [cfg.usfe_pattern.format(i=i) for i in idxs]
-    if len(set(names)) != len(names):
-        errs.append("USFE naming pattern + start/step produce duplicate names.")
+    for label, pat in (("USFE", cfg.usfe_pattern),
+                       ("lattice", cfg.lattice_pattern),
+                       ("composition", cfg.comp_pattern)):
+        names = [pat.format(i=i) for i in idxs]
+        if len(set(names)) != len(names):
+            errs.append(f"{label} naming pattern + start/step produce duplicate "
+                        f"names.")
     return errs
 
 
@@ -179,13 +186,16 @@ def build_lattices(cfg: BuildConfig,
                    should_stop: Callable[[], bool] = lambda: False):
     """Run the full workflow.  Callbacks:
         log(msg)      -> a completed log line
-        status(msg)   -> a transient one-line status (OTIS progress etc.)
+        status(msg)   -> a transient one-line status (generator progress etc.)
         progress(f)   -> overall fraction in [0, 1]
         should_stop() -> return True to abort cleanly between steps
-    Returns the list of (index, usfe_file, lattice_file, mean, std, n)."""
+    Returns a list of (index, usfe_file, lattice_file, comp_file, mean, std, n)."""
     problems = validate(cfg)
     if problems:
         raise ValueError("Cannot start:\n  - " + "\n  - ".join(problems))
+
+    interp = cfg.resolve_interp()
+    log(f"Slip system {cfg.slip_system()}  ->  {interp}")
 
     os.makedirs(cfg.out_dir, exist_ok=True)
     idxs = cfg.indices()
@@ -204,24 +214,34 @@ def build_lattices(cfg: BuildConfig,
 
         usfe_name = cfg.usfe_pattern.format(i=i)
         lattice_name = cfg.lattice_pattern.format(i=i)
-        log(f"[{n+1}/{len(idxs)}] OTIS -> {lattice_name}")
+        comp_name = cfg.comp_pattern.format(i=i)
+        log(f"[{n+1}/{len(idxs)}] lattice_generator -> {lattice_name}")
 
-        # per-lattice OTIS input (temp file in cwd, removed afterwards)
-        with tempfile.NamedTemporaryFile("w", suffix=f"_otis_{i}",
+        # per-lattice generator input (temp file in cwd, removed afterwards)
+        with tempfile.NamedTemporaryFile("w", suffix=f"_geninput_{i}",
                                          delete=False, dir=".") as tf:
-            otis_in = tf.name
-            tf.write(build_otis_input_text(cfg, lattice_name))
+            gen_in = tf.name
+            tf.write(build_generator_input_text(cfg, lattice_name))
+
+        # where the interp writes its per-site composition file.  If we're
+        # keeping it, write straight into out_dir with the comp_{i} name; if
+        # not, write to a temp name in cwd and delete it afterwards.
+        if cfg.keep_comp:
+            comp_out = os.path.join(cfg.out_dir, comp_name)
+        else:
+            comp_out = f".__comp_tmp_{i}"
+
         try:
-            stream_process(["python3", cfg.otis, otis_in], emit)
+            stream_process(["python3", cfg.generator, gen_in], emit)
             if not os.path.exists(lattice_name):
-                raise RuntimeError(f"OTIS did not produce {lattice_name}")
+                raise RuntimeError(f"generator did not produce {lattice_name}")
             step += 1
             progress(step / total_steps)
 
-            log(f"[{n+1}/{len(idxs)}] interp ({os.path.basename(cfg.interp)}) "
+            log(f"[{n+1}/{len(idxs)}] interp ({os.path.basename(interp)}) "
                 f"-> {usfe_name}")
-            stream_process(["python3", cfg.interp, lattice_name,
-                            str(N1), str(N2), str(N3), cfg.csv], emit)
+            stream_process(["python3", interp, lattice_name,
+                            str(N1), str(N2), str(N3), cfg.csv, comp_out], emit)
             interp_out = f"{lattice_name}_usfe"
             if not os.path.exists(interp_out):
                 raise RuntimeError(f"interp did not produce {interp_out}")
@@ -231,9 +251,12 @@ def build_lattices(cfg: BuildConfig,
 
             mean, std, npts = usfe_stats(usfe_final, cfg.usfe_col,
                                          cfg.usfe_skip_header)
+            comp_final = comp_out if cfg.keep_comp else ""
             log(f"       {usfe_name}: mean={mean:.4f}  std={std:.4f}  (N={npts})")
-            stats.append((i, usfe_name, lattice_name, mean, std, npts))
+            stats.append((i, usfe_name, lattice_name, comp_name,
+                          mean, std, npts))
 
+            # lattice file: keep (move to out_dir) or discard
             if cfg.keep_lattices:
                 dest = os.path.join(cfg.out_dir, lattice_name)
                 if os.path.abspath(dest) != os.path.abspath(lattice_name):
@@ -244,16 +267,18 @@ def build_lattices(cfg: BuildConfig,
             step += 1
             progress(step / total_steps)
         finally:
-            for junk in [otis_in, *cfg.interp_side_files]:
-                if os.path.exists(junk):
-                    os.remove(junk)
+            if os.path.exists(gen_in):
+                os.remove(gen_in)
+            if not cfg.keep_comp and os.path.exists(comp_out):
+                os.remove(comp_out)
 
     # summary file
     if stats:
         stats_path = os.path.join(cfg.out_dir, cfg.stats_file)
         with open(stats_path, "w") as f:
-            f.write("index,usfe_file,lattice_file,mean_usfe,std_usfe,n_points\n")
-            for i, uf, lat, mean, std, npts in stats:
-                f.write(f"{i},{uf},{lat},{mean:.6f},{std:.6f},{npts}\n")
+            f.write("index,usfe_file,lattice_file,comp_file,"
+                    "mean_usfe,std_usfe,n_points\n")
+            for i, uf, lat, cmp_, mean, std, npts in stats:
+                f.write(f"{i},{uf},{lat},{cmp_},{mean:.6f},{std:.6f},{npts}\n")
         log(f"Wrote {len(stats)} USFE files + summary -> {stats_path}")
     return stats

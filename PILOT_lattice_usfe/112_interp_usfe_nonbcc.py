@@ -33,9 +33,9 @@ f = open(filename, 'r', encoding='utf-8-sig')
 header = f.readline()
 comp_elems = [c.strip() for c in header.strip().split(',')][1:][::-1]
 ncomp = len(comp_elems)
-if ncomp not in (2, 3):
-    raise ValueError("CSV header must be SFE plus 2 or 3 element columns "
-                     "(found %d: %s)" % (ncomp, comp_elems))
+if ncomp < 2:
+    raise ValueError("CSV header must be SFE plus at least 2 element "
+                     "columns (found %d: %s)" % (ncomp, comp_elems))
 
 sfe_list, comp_list = [], []
 for line in f:
@@ -73,10 +73,14 @@ if ncomp == 3:
     xy[:, 0] = 0.5 * (2 * comp_data[:, 1] + comp_data[:, 2])
     xy[:, 1] = np.sqrt(3) / 2 * comp_data[:, 2]
     usfe_interp = griddata(xy, sfe_vals, (grid_x, grid_y), method='linear')
-else:
+elif ncomp == 2:
     order = np.argsort(comp_data[:, 1])
     t_known = comp_data[order, 1]
     sfe_known = sfe_vals[order]
+else:
+    # 4+ components: nearest-neighbour lookup table in composition space
+    from scipy.spatial import cKDTree
+    comp_tree = cKDTree(comp_data)
 
 #print (lattice)
 
@@ -191,7 +195,7 @@ if ncomp == 3:
               "used nearest-neighbour extrapolation. Add pure-element corner rows "
               "to the CSV (e.g. sfe,0,0,1 / sfe,0,1,0 / sfe,1,0,0) for exact "
               "interpolation near the corners." % (n_extrap, 3*N1*N2*N3))
-else:
+elif ncomp == 2:
     tq = comp[:,:,1]
     usfe = np.interp(tq, t_known, sfe_known)   # SFE vs element[1] fraction (clamps)
     n_clamp = int(np.count_nonzero((tq < t_known[0]) | (tq > t_known[-1])))
@@ -199,6 +203,14 @@ else:
         print("WARNING: %d/%d sites were outside the CSV composition range and "
               "were clamped to the nearest endpoint. Add rows nearer the pure "
               "elements for exact values." % (n_clamp, tq.size))
+else:
+    # 4+ components: assign each site the USFE of the nearest CSV
+    # composition (lookup-table behaviour).
+    flat = comp.reshape(-1, ncomp)
+    _, nn = comp_tree.query(flat)
+    usfe = sfe_vals[nn].reshape(3, N1 * N2 * N3)
+    print("Assigned USFE by nearest-neighbour lookup over %d CSV points "
+          "for a %d-component alloy." % (len(sfe_vals), ncomp))
 print("Calculated local USFE values")
 #print(f"Dimensions of 'usfe': {usfe.shape}")
 
@@ -221,7 +233,7 @@ print("Wrote USFE file %s"%(filename))
 print(f"Dimensions of 'comp': {comp.shape}")
 
 #Write comp values to a file
-output_file = 'monbti_112_1323K_comp_values.txt'
+output_file = args[6] if len(args) > 6 else 'comp_112_values.txt'
 with open(output_file, 'w') as f:
     for i in range(N1 * N2 * N3):
         for j in range(1):
