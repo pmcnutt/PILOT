@@ -36,6 +36,8 @@ BANNER = r"""-------------------------------------------------------------------
     |_|            |___|        |_____|         \___/           |_|
 
 Phase-field dislocation dynamics Input, Lattice & Optimization Toolkit
+                  
+                  3D Lattice and USFE Cell Builder 
 ----------------------------------------------------------------------"""
 
 

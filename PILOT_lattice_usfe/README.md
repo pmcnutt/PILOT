@@ -9,7 +9,7 @@ Dynamics (PFDD) run — end to end, from a single window.
 You describe the alloy, pick a slip system, and the tool:
 
 1. generates one or more RSS lattices,
-2. computes each site's local composition over its slip-plane neighbours,
+2. computes each site's local composition over its slip-plane neighbors,
 3. interpolates your stacking fault energy (SFE) data to that composition, and
 4. writes one `USFE_<i>` file per lattice, plus the lattice and composition
    files if you want to keep them.
@@ -18,7 +18,7 @@ A built-in **viewer** then lets you inspect any generated cell — 2-D planes an
 rotatable 3-D views of atom types, composition, and USFE — without leaving the
 workflow.
 
-It works for **2- and 3-component alloys** with no code changes: everything is
+It works for **2,3,4+ component alloys** with no code changes: everything is
 driven by what you enter and by the SFE CSV you point it at.
 
 ---
@@ -29,7 +29,7 @@ PILOT models **random solid solutions only** — there is no atom swapping and n
 short-range-order option. Choosing the slip system automatically selects the
 lattice type *and* the interpolation, so they can never be mismatched:
 
-| Slip system | Lattice type       | Interpolation script          | Neighbours | Slip planes (l = 0, 1, 2) |
+| Slip system | Lattice type       | Interpolation script          | Neighbors | Slip planes (l = 0, 1, 2) |
 |-------------|--------------------|-------------------------------|------------|---------------------------|
 | **{110}**   | `BCC`              | `110_interp_usfe.py`          | 30         | (110), (01-1), (101)      |
 | **{112}**   | `CUSTOM_NON_ORTHO` | `112_interp_usfe_nonbcc.py`   | 16         | (211), (-1-21), (-11-2)   |
@@ -65,7 +65,7 @@ It repeats that for however many lattices you ask for, records the mean and
 standard deviation of each USFE file, and writes a `usfe_stats.csv` summary.
 
 Generating **many** lattices is the point: each is an independent random
-realisation, so the set samples the statistical variation in the local
+realization, so the set samples the statistical variation in the local
 compositions a dislocation encounters in the bulk.
 
 ---
@@ -78,8 +78,8 @@ compositions a dislocation encounters in the bulk.
 | `usfe_core.py` | All the logic (builds generator inputs, runs the generator + interpolation, names/keeps files, computes stats). Imported by the GUI; no GUI dependencies of its own. |
 | `viewer.py` | Interactive viewer (Tk + matplotlib) for lattice / composition / USFE files. Opened from the GUI, or run standalone. |
 | `lattice_generator.py` | Random solid-solution lattice generator (replaces the old OTIS generator). BCC and CUSTOM_NON_ORTHO only; no swapping. |
-| `110_interp_usfe.py` | Interpolates USFE on the **{110}** slip plane (BCC grid, 30 neighbours). |
-| `112_interp_usfe_nonbcc.py` | Interpolates USFE on the **{112}** slip plane (non-orthogonal grid, 16 neighbours). |
+| `110_interp_usfe.py` | Interpolates USFE on the **{110}** slip plane (BCC grid, 30 neighbors). |
+| `112_interp_usfe_nonbcc.py` | Interpolates USFE on the **{112}** slip plane (non-orthogonal grid, 16 neighbors). |
 | `TaW_110_SFE.csv`, `TaW_112_SFE.csv` | Example SFE data — 2-component Ta–W, {110} and {112}. |
 | `AB_110_SFE.csv` | Example SFE data — generic 2-component A–B. |
 | `MoNbTi_sfe_data.csv` | Example SFE data — 3-component alloy. |
@@ -119,8 +119,11 @@ python3 usfe_workflow_gui.py
 
 A window opens with three sections:
 
-1. **Slip system & alloy** — pick `{110}` or `{112}`, then set cell size,
-   lattice parameter, elements, and concentrations.
+1. **Slip system & alloy** — pick `{110}` or `{112}`, set cell size and lattice
+   parameter, then enter the **# of alloying elements**. That populates a row
+   of element boxes over a row of concentration boxes; fill the element names
+   and all but the last concentration — the last one auto-fills to
+   `1 - (the rest)`.
 2. **How many / naming** — number of lattices, index start/step, the name
    patterns for the USFE, lattice, and composition files, and whether to keep
    the lattice and composition files.
@@ -192,7 +195,7 @@ In the viewer:
   - *Atom types (3-D cell)* — the whole cell, atoms colored by element,
   - *USFE (3-D cell)* — the whole cell colored by USFE.
 
-  USFE color bars are labelled `USFE_0` / `USFE_1` / `USFE_2` for the
+  USFE color bars are labeled `USFE_0` / `USFE_1` / `USFE_2` for the
   selected slip plane. The 3-D views use a fixed viewing frame per slip
   system, so switching the USFE index only recolors the cell — it does not
   reorient the camera.
@@ -212,6 +215,16 @@ In the viewer:
   (elevation 22°, azimuth 180°), and you can adjust it live with the
   **elevation / azimuth sliders** or by **dragging the plot**. Lower the
   *subsample* for snappier rotation on large cells.
+- **Hover readout** — in both the 2-D and 3-D views, hovering over a lattice
+  point shows, in the toolbar's bottom-right, that site's full info: its
+  composition (every element fraction) and the selected plane's USFE, plus
+  its `(i,j,k)` indices and `xyz` — regardless of which field is being
+  plotted. Atom type is added only in the 3-D atom-types view.
+- **Marker size** scales down automatically for larger lattices so points
+  don't overlap: half the diameter at 64³, a quarter at 128³.
+- The **Load files** button sits just above the slip-system / plane controls,
+  and the slip-plane names use proper bars over negative indices
+  (e.g. `(011̅)`, `(1̅2̅1)`).
 
 The viewer reproduces the two Jupyter notebooks (`{110}` and `{112}`) in one
 window; you no longer need to open a notebook to look at a result.
@@ -231,7 +244,7 @@ SFE,<element1>,<element2>[,<element3>]
 
 - **2 element columns → binary alloy** (1-D interpolation of SFE vs composition).
 - **3 element columns → ternary alloy** (2-D composition-triangle interpolation).
-- **4+ element columns → nearest-neighbour lookup**: each site is assigned the
+- **4+ element columns → nearest-neighbor lookup**: each site is assigned the
   USFE of the closest composition in the CSV (a lookup table).
 - A UTF-8 BOM and Windows (CRLF) line endings are both fine.
 - Blank lines and lines starting with `#` are ignored.
@@ -277,15 +290,15 @@ Each interpolation script:
 
 1. Reads the lattice and the SFE CSV (element names come from the CSV header).
 2. Computes each site's **local composition** by averaging over its slip-plane
-   neighbours (**{110}** uses 30 neighbours; **{112}** uses 16).
+   neighbors (**{110}** uses 30 neighbors; **{112}** uses 16).
 3. Maps local composition → USFE:
    - **3 components:** embeds the composition simplex in 2-D and does a linear
      interpolation over your CSV points.
    - **2 components:** 1-D interpolation of SFE vs the composition fraction.
-   - **4+ components:** nearest-neighbour lookup — each site takes the USFE of
+   - **4+ components:** nearest-neighbor lookup — each site takes the USFE of
      the closest CSV composition. Add more CSV rows for finer resolution.
 4. For 2- and 3-component alloys, any site outside the CSV's range uses
-   nearest-neighbour extrapolation (with a warning) rather than producing `NaN`.
+   nearest-neighbor extrapolation (with a warning) rather than producing `NaN`.
 
 Run one standalone if you like (6th argument is the composition-output path):
 
@@ -305,7 +318,7 @@ but if you run it by hand the input format is:
 ```
 BCC                 # lattice type: BCC or CUSTOM_NON_ORTHO
 32 32 32            # N1 N2 N3
-2.86                # nearest-neighbour distance
+2.86                # nearest-neighbor distance
 2                   # number of components
 Ta W                # element names
 0.5 0.5             # concentrations
@@ -316,7 +329,7 @@ my_lattice          # output filename
 python3 lattice_generator.py <input_file>
 ```
 
-Each run is a fresh random realisation, so building N lattices gives N distinct
+Each run is a fresh random realization, so building N lattices gives N distinct
 configurations.
 
 ---
@@ -336,7 +349,7 @@ workflow, with PFDD at the center.
 **`ModuleNotFoundError: tkinter`.** Install `python3-tk`, or use `--cli` for the
 workflow. (The viewer needs tkinter.)
 
-**USFE files full of `NaN`, or "nearest-neighbour extrapolation" warnings.**
+**USFE files full of `NaN`, or "nearest-neighbor extrapolation" warnings.**
 The CSV doesn't span the compositions being queried — add the pure-element rows
 (endpoints for a binary, corners for a ternary).
 

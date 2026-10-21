@@ -97,11 +97,11 @@ DEFAULTS = {
     "slip": list(SLIP_SYSTEMS)[0],
     "lattice_type": "BCC", "cell": "32 32 32", "lattice_param": "3.16",
     "labels": "Ta W", "conc": "0.5 0.5",
-    "n_lat": "15", "index_start": "0", "index_step": "100",
+    "n_lat": "1", "index_start": "0", "index_step": "100",
     "usfe_pattern": "USFE_{i}", "lattice_pattern": "lattice_{i}",
     "comp_pattern": "comp_{i}",
     "keep_lattices": True, "keep_comp": True, "out_dir": ".",
-    "csv": "TaW_110_SFE.csv",
+    "csv": "TaW_110_SFE_NequIP.csv",
     "generator": "lattice_generator.py", "usfe_col": "4", "usfe_skip_header": "1",
 }
 
@@ -129,7 +129,7 @@ def run_gui():
         vars_[key] = var
         return ttk.Entry(parent, textvariable=var, width=width)
 
-    # ---------- 1. Slip system + lattice ----------
+    # ---------- 1. Slip system + alloy ----------
     f1 = ttk.LabelFrame(root, text="1.  Slip system  &  alloy")
     f1.pack(fill="x", **pad)
 
@@ -145,13 +145,79 @@ def run_gui():
     ttk.Label(f1, text="Lattice parameter").grid(row=1, column=2, sticky="w", **pad)
     entry(f1, "lattice_param", 10).grid(row=1, column=3, sticky="w", **pad)
 
-    ttk.Label(f1, text="Elements").grid(row=2, column=0, sticky="w", **pad)
-    entry(f1, "labels", 24).grid(row=2, column=1, sticky="w", **pad)
-    ttk.Label(f1, text="Concentrations").grid(row=2, column=2, sticky="w", **pad)
-    entry(f1, "conc", 24).grid(row=2, column=3, sticky="w", **pad)
+    ttk.Label(f1, text="# of alloying elements").grid(row=2, column=0,
+                                                      sticky="w", **pad)
+    n_elem_var = tk.StringVar(value="2")
+    ttk.Spinbox(f1, from_=1, to=8, width=5, textvariable=n_elem_var).grid(
+        row=2, column=1, sticky="w", **pad)
+    ttk.Label(f1, text="(last concentration auto-fills to 1 - the rest)",
+              foreground="#555").grid(row=2, column=2, columnspan=2,
+                                      sticky="w", **pad)
 
-    ttk.Label(f1, text="Random solid solution (no short-range order)",
-              foreground="#555").grid(row=3, column=0, columnspan=4,
+    # dynamic element / concentration grid (row of elements over a row of concs)
+    alloy_frame = ttk.Frame(f1)
+    alloy_frame.grid(row=3, column=0, columnspan=4, sticky="w", **pad)
+    elem_vars = []
+    conc_vars = []
+
+    def _fmt_conc(x):
+        txt = f"{x:.6f}".rstrip("0").rstrip(".")
+        return txt if txt else "0"
+
+    def recompute_last(*_):
+        n = len(conc_vars)
+        if n == 0:
+            return
+        if n == 1:
+            conc_vars[0].set("1")
+            return
+        total = 0.0
+        for c in range(n - 1):
+            try:
+                total += float(conc_vars[c].get())
+            except ValueError:
+                return
+        conc_vars[n - 1].set(_fmt_conc(1.0 - total))
+
+    def rebuild_alloy(*_):
+        try:
+            n = int(float(n_elem_var.get()))
+        except ValueError:
+            return
+        n = max(1, min(n, 8))
+        old_e = [v.get() for v in elem_vars]
+        old_c = [v.get() for v in conc_vars]
+        for w in alloy_frame.winfo_children():
+            w.destroy()
+        elem_vars.clear()
+        conc_vars.clear()
+        seed_e = old_e if any(old_e) else ["Ta", "W", "Mo", "Nb", "Ti", "V",
+                                           "Cr", "Fe"]
+        seed_c = old_c if any(old_c) else ["0.5"]
+        ttk.Label(alloy_frame, text="element type").grid(
+            row=0, column=0, sticky="e", **pad)
+        ttk.Label(alloy_frame, text="concentration").grid(
+            row=1, column=0, sticky="e", **pad)
+        for c in range(n):
+            ev = tk.StringVar(value=seed_e[c] if c < len(seed_e) else "")
+            cv = tk.StringVar(value=seed_c[c] if c < len(seed_c) else "")
+            elem_vars.append(ev)
+            conc_vars.append(cv)
+            ttk.Entry(alloy_frame, textvariable=ev, width=8).grid(
+                row=0, column=c + 1, **pad)
+            is_last = (c == n - 1 and n >= 2)
+            ttk.Entry(alloy_frame, textvariable=cv, width=8,
+                      state="readonly" if is_last else "normal").grid(
+                row=1, column=c + 1, **pad)
+            if not is_last:
+                cv.trace_add("write", recompute_last)
+        recompute_last()
+
+    n_elem_var.trace_add("write", rebuild_alloy)
+    rebuild_alloy()
+
+    ttk.Label(f1, text="Random solid solution (no short-range order).",
+              foreground="#555").grid(row=4, column=0, columnspan=4,
                                       sticky="w", **pad)
 
     # ---------- 2. How many / naming ----------
@@ -220,18 +286,21 @@ def run_gui():
     btn.grid(row=0, column=0, sticky="w", **pad)
     stop_btn = ttk.Button(f5, text="Stop", state="disabled")
     stop_btn.grid(row=0, column=1, sticky="w", **pad)
-    view_btn = ttk.Button(f5, text="View generated files...")
-    view_btn.grid(row=0, column=2, sticky="w", **pad)
     prog = ttk.Progressbar(f5, length=260, mode="determinate", maximum=1.0)
-    prog.grid(row=0, column=3, sticky="we", **pad)
+    prog.grid(row=0, column=2, sticky="we", **pad)
+
+    # View button: its own full-width row, larger (extra vertical padding)
+    view_btn = ttk.Button(f5, text="View generated files...")
+    view_btn.grid(row=1, column=0, columnspan=3, sticky="we", ipady=10, **pad)
+
     status_var = tk.StringVar(value="Ready.")
-    ttk.Label(f5, textvariable=status_var).grid(row=1, column=0, columnspan=4,
+    ttk.Label(f5, textvariable=status_var).grid(row=2, column=0, columnspan=3,
                                                 sticky="w", **pad)
     log = ScrolledText(f5, height=14, state="disabled", wrap="none",
                    font="TkFixedFont")
-    log.grid(row=2, column=0, columnspan=4, sticky="nsew", **pad)
-    f5.rowconfigure(2, weight=1)
-    f5.columnconfigure(3, weight=1)
+    log.grid(row=3, column=0, columnspan=3, sticky="nsew", **pad)
+    f5.rowconfigure(3, weight=1)
+    f5.columnconfigure(2, weight=1)
 
     def _pick_dir(var):
         d = filedialog.askdirectory()
@@ -298,6 +367,10 @@ def run_gui():
     def _collect_cfg():
         raw = {k: (val.get() if hasattr(val, "get") else val)
                for k, val in vars_.items() if not k.startswith("_")}
+        raw["labels"] = " ".join(v.get().strip() for v in elem_vars
+                                 if v.get().strip())
+        raw["conc"] = " ".join(v.get().strip() for v in conc_vars
+                               if v.get().strip())
         return parse_config_from_strings(raw)
 
     def on_generate():

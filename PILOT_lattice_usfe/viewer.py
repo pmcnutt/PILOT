@@ -64,13 +64,13 @@ B_DIR = np.array([-1, 1, 1], float)
 SLIP_PLANES = {
     "{110}": [
         ((1, 1, 0),   "(110)",   "(110)"),
-        ((0, 1, -1),  "(01-1)",  r"(01$\bar{1}$)"),
+        ((0, 1, -1),  "(011̅)",  r"(01$\bar{1}$)"),
         ((1, 0, 1),   "(101)",   "(101)"),
     ],
     "{112}": [
         ((2, 1, 1),   "(211)",   "(211)"),
-        ((-1, -2, 1), "(-1-21)", r"($\bar{1}\bar{2}$1)"),
-        ((-1, 1, -2), "(-11-2)", r"($\bar{1}$1$\bar{2}$)"),
+        ((-1, -2, 1), "(1̅2̅1)", r"($\bar{1}\bar{2}$1)"),
+        ((-1, 1, -2), "(1̅12̅)", r"($\bar{1}$1$\bar{2}$)"),
     ],
 }
 LATTICE_TO_SLIP = {"BCC": "{110}", "CUSTOM_NON_ORTHO": "{112}"}
@@ -171,6 +171,13 @@ def _dir_label(v):
     return f"[{s}]"
 
 
+def _dir_label_plain(v):
+    """Plain-text direction label using a Unicode overbar (for the toolbar
+    readout, which does not render mathtext)."""
+    s = "".join(("%d\u0305" % abs(int(c)) if c < 0 else "%d" % int(c)) for c in v)
+    return f"[{s}]"
+
+
 def project(coords, x_dir, y_dir):
     """Project coords onto the viewing frame.  Returns U, V, Wp, planes and the
     three axis labels.  The out-of-plane (viewing) direction is X x Y."""
@@ -221,7 +228,7 @@ def run_viewer(master=None, folder=".", slip="{110}",
 
     state = {"coords": None, "elems": None, "comp": None, "comp_cols": None,
              "usfe_by_l": None, "cell": None, "2d": None, "3d": None,
-             "loaded": False}
+             "loaded": False, "hover3d": None}
 
     pad = {"padx": 5, "pady": 2}
     left = ttk.Frame(win)
@@ -304,6 +311,10 @@ def run_viewer(master=None, folder=".", slip="{110}",
         v["usfe"].set(os.path.join(folder, f"USFE_{i}"))
     ttk.Button(idxf, text="fill", width=5, command=fill_by_index).pack(side="left")
 
+    # ---- load (placed above the slip-system / plane section) ----
+    ttk.Button(left, text="Load files", command=lambda: load()).pack(
+        fill="x", **pad)
+
     # ---- slip system + plane ----
     sf = ttk.LabelFrame(left, text="Slip system & plane")
     sf.pack(fill="x", **pad)
@@ -318,9 +329,6 @@ def run_viewer(master=None, folder=".", slip="{110}",
     ttk.Label(sf, text="(index -> slip plane; sets USFE column & 2-D slice)",
               foreground="#555", wraplength=250).grid(
         row=2, column=0, columnspan=2, sticky="w", **pad)
-
-    ttk.Button(left, text="Load files", command=lambda: load()).pack(
-        fill="x", **pad)
 
     # ---- view mode ----
     mf = ttk.LabelFrame(left, text="View")
@@ -387,7 +395,7 @@ def run_viewer(master=None, folder=".", slip="{110}",
     fig = Figure(figsize=(7.6, 7.2))
     canvas = FigureCanvasTkAgg(fig, master=right)
     canvas.get_tk_widget().pack(fill="both", expand=True)
-    NavigationToolbar2Tk(canvas, right)
+    toolbar = NavigationToolbar2Tk(canvas, right)
 
     rng = np.random.default_rng(0)
 
@@ -491,6 +499,59 @@ def run_viewer(master=None, folder=".", slip="{110}",
         except Exception:
             pass
 
+    def _plain(lbl):
+        """Convert a mathtext axis label like '[$\\bar{1}$11]' to plain
+        '[1\u0305 11]' so it renders in the toolbar coordinate readout."""
+        return re.sub(r"\$\\bar\{(\d+)\}\$",
+                      lambda m: m.group(1) + "\u0305", lbl).replace("$", "")
+
+    def site_info(gi, include_atom=False):
+        """Full readout for one site: composition + the selected-plane USFE
+        (+ atom type only when asked), with its (i,j,k) indices and xyz."""
+        N1, N2, N3 = state["cell"]
+        i = gi % N1
+        j = (gi // N1) % N2
+        kk = gi // (N1 * N2)
+        cx, cy, cz = state["coords"][gi]
+        parts = []
+        comp = state["comp"]
+        cols = state["comp_cols"]
+        if comp is not None and cols:
+            parts.append(" ".join(f"{cols[t]}={float(comp[gi, t]):.2f}"
+                                  for t in range(len(cols))))
+        l = cur_l()
+        ua = state["usfe_by_l"]
+        if ua is not None and not np.isnan(ua[l][gi]):
+            parts.append(f"USFE_{l}={float(ua[l][gi]):.1f}")
+        if include_atom and state["elems"] is not None:
+            parts.append(f"atom={state['elems'][gi]}")
+        return (f"site ({i},{j},{kk})  xyz=({cx:.2f},{cy:.2f},{cz:.2f})   |  "
+                + "   ".join(parts))
+
+    def _set_hover(ax, labels, Uc, Vc, gidx):
+        """2-D hover: when the cursor is near a marker, show that site's full
+        info (composition + USFE); otherwise show the in-plane coordinates."""
+        lx = _plain(labels[0])
+        ly = _plain(labels[1])
+        Uc = np.asarray(Uc)
+        Vc = np.asarray(Vc)
+        if len(Uc) > 1:
+            span = max(np.ptp(Uc), np.ptp(Vc), 1e-9)
+            thr = 0.6 * span / max(1.0, np.sqrt(len(Uc)))
+        else:
+            thr = 1e9
+
+        def fmt(x, y):
+            base = f"{lx}={x:.3f}  {ly}={y:.3f}"
+            if len(Uc) == 0:
+                return base
+            d2 = (Uc - x) ** 2 + (Vc - y) ** 2
+            k = int(np.argmin(d2))
+            if float(d2[k]) ** 0.5 > thr:
+                return base
+            return site_info(int(gidx[k]))
+        ax.format_coord = fmt
+
     def draw(full=True):
         if not state["loaded"]:
             return
@@ -507,6 +568,13 @@ def run_viewer(master=None, folder=".", slip="{110}",
 
         fig.clear()
         fig._is3d = is3d
+        # markers shrink for larger lattices so points do not overlap:
+        # diameter ~ 32/N (half at 64, quarter at 128); s (area) ~ (32/N)^2
+        _N = max(state["cell"])
+        _sd = min(1.5, 32.0 / _N)
+        s2d = max(4.0, 80.0 * _sd * _sd)
+        s3d = max(2.0, 25.0 * _sd * _sd)
+        state["hover3d"] = None
 
         if not is3d:
             U, V, Wp, planes, labels = state["2d"]
@@ -525,9 +593,11 @@ def run_viewer(master=None, folder=".", slip="{110}",
                     ax = fig.add_subplot(gs[0])
                     triax = fig.add_subplot(gs[1])
                     rgb = np.clip(state["comp"][:, :3], 0, 1)
-                    ax.scatter(U[mask], V[mask], c=rgb[mask], s=80, marker="H",
+                    ax.scatter(U[mask], V[mask], c=rgb[mask], s=s2d, marker="H",
                                edgecolors="k", linewidths=0.3)
                     _draw_triangle_legend(triax, cols)
+                    _set_hover(ax, labels, U[mask], V[mask],
+                               np.nonzero(mask)[0])
                     ax.set_title(f"Local composition (ternary RGB)  -  "
                                  f"{plane_tex} slice  -  plane {p}/{len(planes)-1}")
                 else:
@@ -537,22 +607,25 @@ def run_viewer(master=None, folder=".", slip="{110}",
                     ci = cols.index(col) if col in cols else len(cols) - 1
                     field = state["comp"][:, ci]
                     sc = ax.scatter(U[mask], V[mask], c=field[mask], cmap="rainbow",
-                                    vmin=vmin, vmax=vmax, s=80, marker="H",
+                                    vmin=vmin, vmax=vmax, s=s2d, marker="H",
                                     edgecolors="k", linewidths=0.3)
                     cb = fig.colorbar(sc, ax=ax, fraction=0.046, pad=0.04)
                     cb.set_label(f"{cols[ci]} fraction")
                     ax.set_title(f"Local {cols[ci]} fraction  -  {plane_tex} slice "
                                  f" -  plane {p}/{len(planes)-1}")
+                    _set_hover(ax, labels, U[mask], V[mask],
+                               np.nonzero(mask)[0])
             else:
                 ax = fig.add_subplot(111)
                 vmin, vmax = _lim(v["usfe_min"], v["usfe_max"])
                 field = state["usfe_by_l"][l]
                 sc = ax.scatter(U[mask], V[mask], c=field[mask], cmap="viridis",
-                                vmin=vmin, vmax=vmax, s=80, marker="H",
+                                vmin=vmin, vmax=vmax, s=s2d, marker="H",
                                 edgecolors="k", linewidths=0.3)
                 cb = fig.colorbar(sc, ax=ax, fraction=0.046, pad=0.04)
                 cb.set_label(r"USFE_%d (mJ/m$^2$)" % l)
                 ax.set_title(f"USFE_{l} on {plane_tex}  -  plane {p}/{len(planes)-1}")
+                _set_hover(ax, labels, U[mask], V[mask], np.nonzero(mask)[0])
             ax.set_aspect("equal")
             ax.set_xlabel(labels[0])
             ax.set_ylabel(labels[1])
@@ -567,7 +640,7 @@ def run_viewer(master=None, folder=".", slip="{110}",
                 cmap = plt.get_cmap("tab10")
                 cmap_e = {e: cmap(i % 10) for i, e in enumerate(uniq)}
                 cvec = np.array([cmap_e[e] for e in elems[keep]])
-                ax.scatter(U[keep], V[keep], Wp[keep], c=cvec, s=25,
+                ax.scatter(U[keep], V[keep], Wp[keep], c=cvec, s=s3d,
                            depthshade=True, edgecolors="k", linewidths=0.3)
                 handles = [Line2D([], [], ls="", marker="o", markersize=7,
                                   markerfacecolor=cmap_e[e], markeredgecolor="k",
@@ -575,19 +648,58 @@ def run_viewer(master=None, folder=".", slip="{110}",
                            for e in uniq]
                 ax.legend(handles=handles, loc="upper left", fontsize=9)
                 _style_3d(ax, "3-D cell - atom types", labels, U, V, Wp)
+                state["hover3d"] = dict(
+                    ax=ax, xs=U[keep], ys=V[keep], zs=Wp[keep],
+                    gidx=np.nonzero(keep)[0], atom=True)
             else:
                 vmin, vmax = _lim(v["usfe_min"], v["usfe_max"])
                 usfe = state["usfe_by_l"][l]
                 m = keep & ~np.isnan(usfe)
                 sc = ax.scatter(U[m], V[m], Wp[m], c=usfe[m], cmap="viridis",
-                                vmin=vmin, vmax=vmax, s=25, depthshade=True,
+                                vmin=vmin, vmax=vmax, s=s3d, depthshade=True,
                                 edgecolors="k", linewidths=0.3)
                 cb = fig.colorbar(sc, ax=ax, fraction=0.03, pad=0.10)
                 cb.set_label(r"USFE_%d (mJ/m$^2$)" % l)
                 _style_3d(ax, f"3-D cell - USFE_{l} on {plane_tex}",
                           labels, U, V, Wp)
+                state["hover3d"] = dict(
+                    ax=ax, xs=U[m], ys=V[m], zs=Wp[m],
+                    gidx=np.nonzero(m)[0], atom=False)
             ax.view_init(elev=v["elev"].get(), azim=v["azim"].get())
         canvas.draw_idle()
+
+    def _on_motion_3d(event):
+        """3-D hover: report the nearest plotted site's value + (i,j,k) + xyz."""
+        h = state.get("hover3d")
+        if not h or event.inaxes is not h["ax"] \
+                or event.x is None or event.y is None:
+            return
+        from mpl_toolkits.mplot3d import proj3d
+        try:
+            x2, y2, _ = proj3d.proj_transform(h["xs"], h["ys"], h["zs"],
+                                              h["ax"].get_proj())
+            disp = h["ax"].transData.transform(np.column_stack([x2, y2]))
+        except Exception:
+            return
+        if len(disp) == 0:
+            return
+        dx = disp[:, 0] - event.x
+        dy = disp[:, 1] - event.y
+        d2 = dx * dx + dy * dy
+        k = int(np.argmin(d2))
+        if float(d2[k]) ** 0.5 > 16:      # pixels; too far from any marker
+            return
+        gi = int(h["gidx"][k])
+        try:
+            msg = site_info(gi, include_atom=h.get("atom", False))
+        except Exception:
+            return
+        try:
+            toolbar.set_message(msg)
+        except Exception:
+            pass
+
+    canvas.mpl_connect("motion_notify_event", _on_motion_3d)
 
     # ---- wire controls ----
     def on_system(*_):
