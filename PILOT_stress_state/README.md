@@ -49,7 +49,7 @@ reverts the most recent generate/update/extend if you make a mistake.
 | `stress_state_gui.py` | The graphical workflow. **Run this for the GUI.** |
 | `crss_search_alloy.py` | The command-line driver (init/generate/update/extend/report/undo). |
 | `crss_core.py` | The search engine shared by the GUI and CLI. No GUI dependencies. |
-| `mrssp_gui.py` | Stress-state explorer (shear couple **and** uniaxial). Launched from the GUI to choose/visualise the stress state, or run standalone. |
+| `mrssp_gui.py` | Stress-state explorer (shear couple **and** uniaxial). Launched from the GUI to choose/visualize the stress state, or run standalone. |
 | `plot_crss.py` | Plot CRSS vs temperature from one or more `search_state.json` files. |
 | `fetch_dumps.sh` | Copy the PFDD dump files for a study from a cluster to a local folder (for OVITO). |
 | `templates/in.Ta10W_110_template`, `templates/in.Ta10W_112_template` | PFDD input templates (with `temperature`, `seed`, `sigma`, `DUMPFILE_PLACEHOLDER`, `USFEFILE_PLACEHOLDER` lines the SLURM job fills in). |
@@ -133,21 +133,19 @@ Open it with **Visualize / set stress...**.  The bar chart shows what each
   set by chi.  The bars are the **resolved (glide) shear** tau/tau0 on each
   plane -- the shear stress driving the screw dislocation along its Burgers
   vector b on that plane.  {110} bars are green, {112} bars are blue.  The chi
-  preset buttons are labelled with the plane each angle puts the MRSSP on.
+  preset buttons are labeled with the plane each angle puts the MRSSP on.
 
 - **Uniaxial mode** applies sigma = s0 (a (x) a) along an axis a.  A general
-  load resolves onto each plane as three tractions, shown as three (non-green,
-  non-blue) bars per plane:
-  - **glide** -- the shear along b (this *is* the "resolved shear"; it is what
+  load resolves onto each plane as three tractions, shown as three bars per plane:
+  - **shear** -- the shear along b (this *is* the "resolved shear"; it is what
     drives glide, and equals the shear-couple bar when the couple is applied),
   - **Escaig** -- the in-plane shear perpendicular to b (does not drive glide,
     but can affect the core / cross-slip),
   - **normal** -- the stress acting perpendicular to the plane (opens/closes it;
     a non-glide component absent from the pure shear couple).
 
-So "glide" is the same thing as the resolved shear; "Escaig" and "normal" are
-the extra non-glide components a uniaxial load introduces that a pure shear
-couple does not.
+"Escaig" and "normal" are the extra non-glide components a uniaxial load introduces 
+that a pure shear couple does not.
 
 ## Cases file format (the alloy link)
 

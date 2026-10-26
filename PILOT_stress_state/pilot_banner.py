@@ -37,7 +37,7 @@ BANNER = r"""-------------------------------------------------------------------
 
 Phase-field dislocation dynamics Input, Lattice & Optimization Toolkit
 
-                      Stress State Optimization 
+                      Stress State Optimization
 ----------------------------------------------------------------------"""
 
 

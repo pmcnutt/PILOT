@@ -193,22 +193,31 @@ def run_gui():
 
     V["dumps_name"] = tk.StringVar(value="dumps_local")
 
-    # ---------- Actions ----------
-    fa = ttk.LabelFrame(root, text="Actions")
+    # ---------- Initialize (its own full-width button, above the actions) ----------
+    ttk.Button(root, text="Initialize binary CRSS search",
+               command=lambda: do(cc.init, force_confirm=True)).pack(
+        fill="x", ipady=10, **pad)
+
+    # ---------- Binary Search Actions ----------
+    fa = ttk.LabelFrame(root, text="Binary Search Actions")
     fa.pack(fill="x", **pad)
-    btns = [("Initialize search", lambda: do(cc.init, force_confirm=True)),
-            ("Generate round", lambda: do(cc.generate)),
-            ("Update (grade)...", lambda: open_update()),
-            ("Extend", lambda: do_extend()),
-            ("Undo", lambda: do(cc.undo)),
-            ("Report", lambda: show_report()),
-            ("Send to cluster...", lambda: open_send()),
-            ("Fetch dumps...", lambda: open_fetch()),
+    btns = [("Generate new round", lambda: do(cc.generate)),
+            ("Update round (grade)...", lambda: open_update()),
+            ("Send files to cluster...", lambda: open_send()),
+            ("Fetch dumps from cluster...", lambda: open_fetch()),
             ("Delete local dumps", lambda: delete_dumps()),
-            ("Plot CRSS vs T", lambda: plot_crss())]
+            ("Report Current CRSS", lambda: show_report()),
+            ("Extend stress bracket", lambda: do_extend()),
+            ("Undo previous grading", lambda: do(cc.undo))]
     for i, (lab, cmd) in enumerate(btns):
-        ttk.Button(fa, text=lab, command=cmd, width=18).grid(
-            row=i // 3, column=i % 3, **pad)
+        ttk.Button(fa, text=lab, command=cmd).grid(
+            row=i // 2, column=i % 2, sticky="we", **pad)
+    fa.columnconfigure(0, weight=1)
+    fa.columnconfigure(1, weight=1)
+
+    # ---------- Plot (its own full-width button, below the actions) ----------
+    ttk.Button(root, text="Plot CRSS vs T",
+               command=lambda: plot_crss()).pack(fill="x", ipady=10, **pad)
 
     # ---------- Log ----------
     log = ScrolledText(root, height=15, state="disabled", wrap="word",
