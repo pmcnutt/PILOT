@@ -49,15 +49,15 @@ For each lattice it runs a two-step pipeline:
                           │
                           ▼
    ┌──────────────────────────────────────────────┐
-   │  1. lattice_generator.py                      │  random solid-solution
-   │       → lattice_<i>                            │  BCC or CUSTOM_NON_ORTHO
+   │  1. lattice_generator.py                     │  random solid-solution
+   │       → lattice_<i>                          │  BCC or CUSTOM_NON_ORTHO
    └──────────────────────────────────────────────┘
                           │
                           ▼
    ┌──────────────────────────────────────────────┐
-   │  2. interpolation  (auto-selected)            │  local composition → USFE
-   │       110_interp_usfe.py        ({110})       │  from your SFE CSV
-   │       112_interp_usfe_nonbcc.py ({112})       │  → USFE_<i>, comp_<i>
+   │  2. interpolation  (auto-selected)           │  local composition → USFE
+   │       110_interp_usfe.py        ({110})      │  from your SFE CSV
+   │       112_interp_usfe_nonbcc.py ({112})      │  → USFE_<i>, comp_<i>
    └──────────────────────────────────────────────┘
 ```
 
@@ -81,7 +81,6 @@ compositions a dislocation encounters in the bulk.
 | `110_interp_usfe.py` | Interpolates USFE on the **{110}** slip plane (BCC grid, 30 neighbors). |
 | `112_interp_usfe_nonbcc.py` | Interpolates USFE on the **{112}** slip plane (non-orthogonal grid, 16 neighbors). |
 | `TaW_110_SFE.csv`, `TaW_112_SFE.csv` | Example SFE data — 2-component Ta–W, {110} and {112}. |
-| `AB_110_SFE.csv` | Example SFE data — generic 2-component A–B. |
 | `MoNbTi_sfe_data.csv` | Example SFE data — 3-component alloy. |
 
 Keep these in the same folder, and run everything from that folder.

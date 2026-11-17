@@ -15,11 +15,9 @@ interstitial_mobility 0
 
 create_box       box
 create_sites     box
-material         preset Ta10W112_MITCH mpea USFEFILE_PLACEHOLDER dAdc 0.0 0.0 0.0 aflag 2
+material         preset Ta10W_112 mpea USFEFILE_PLACEHOLDER dAdc 0.0 0.0 0.0 aflag 2
 solve_style GL max_iter 35000 tol 0.0001 int_tol 0.0 relax_before_run 1 freeze_after_relax 1
 
-gflag           0
-blur_stress     1
 temperature     0
 
 diag_style      strain

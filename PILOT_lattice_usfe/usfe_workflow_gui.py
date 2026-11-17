@@ -16,6 +16,10 @@ The real work lives in usfe_core.py; this file is just the front end.  A
 "View generated files..." button opens viewer.py to inspect any result.
 Keep lattice_generator.py, the interp scripts, viewer.py and your CSV reachable
 from where you run this (same folder is simplest).
+
+The PILOT banner is built into this file (no separate pilot_banner.py needed).
+In the window, drag the bar above the terminal up to enlarge the terminal, or
+down to shrink it; the controls above it scroll when they don't all fit.
 """
 
 import os
@@ -25,7 +29,48 @@ import threading
 import traceback
 
 import usfe_core as core
-import pilot_banner
+
+# --------------------------- PILOT banner --------------------------------
+
+BANNER = r"""----------------------------------------------------------------------
+
+                                 /||\
+                                / -- \
+                               /      \
+                               |  ::  |
+                               |  __  |
+                               | /  \ |
+     ____________________ _|_  | |  | |  _|_ ____________________
+    /--------------------/   \----------/   \--------------------\
+    |                    |   |          |   |                    |
+    |     :              |   |    ::    |   |            :       |
+    |_______________ ___ \   /          \   / ___ _______________|
+     \_____________|___|__| |____________| |__|___|_____________/
+                          | |  |  ||  |  | |
+                               |  ||  |
+                               |      |
+                               / \  / \
+                             -(   )(   )-
+                               \ /  \ /
+                                \    /
+                           _____/ || \_____
+                          / :    \||/    : \
+                          | ____  ||  ____ |
+                           \___|__||__|___/
+                                  ||
+
+     ____           ___          _               ___           _____
+    |  _ \         |_ _|        | |             / _ \         |_   _|
+    | |_) |         | |         | |            | | | |          | |
+    |  __/          | |         | |            | | | |          | |
+    | |             | |         | |___         | |_| |          | |
+    |_|            |___|        |_____|         \___/           |_|
+
+Phase-field dislocation dynamics Input, Lattice & Optimization Toolkit
+                  
+                  3D Lattice and USFE Cell Builder 
+----------------------------------------------------------------------"""
+
 
 # Slip system shown in the UI -> (lattice type, interpolation script).
 # The interpolation is also derivable in core; this table drives the UI choice.
@@ -101,12 +146,120 @@ DEFAULTS = {
     "usfe_pattern": "USFE_{i}", "lattice_pattern": "lattice_{i}",
     "comp_pattern": "comp_{i}",
     "keep_lattices": True, "keep_comp": True, "out_dir": ".",
-    "csv": "TaW_110_SFE_NequIP.csv",
+    "csv": "SFE_data/TaW_110_SFE_NequIP.csv",
     "generator": "lattice_generator.py", "usfe_col": "4", "usfe_skip_header": "1",
 }
 
 
 # ================================ GUI ====================================
+
+# ------------------- resizable terminal + scrollable panel -----------------
+
+def _split_layout(root, tk, ttk):
+    """Split the window into a scrollable control panel (top) and the
+    terminal (bottom), with a draggable bar between them.
+
+        drag the bar UP    -> bigger terminal
+        drag the bar DOWN  -> smaller terminal
+
+    The control panel has its own vertical scrollbar (and mouse-wheel
+    scrolling), so nothing is lost when the terminal takes up more room.
+
+    Returns (form, term_frame, finish):
+        form        -- put the controls in here
+        term_frame  -- put the terminal (log) in here
+        finish()    -- call once every widget exists; sets the starting bar
+                       position and the mouse-wheel routing.
+    """
+    paned = tk.PanedWindow(root, orient="vertical", sashwidth=10,
+                           sashrelief="raised", sashpad=1, borderwidth=0,
+                           showhandle=False, handlesize=10, handlepad=40,
+                           opaqueresize=True, sashcursor="sb_v_double_arrow")
+    paned.pack(fill="both", expand=True)
+
+    # ---- top pane: scrollable control panel ----
+    top = ttk.Frame(paned)
+    try:
+        bg = ttk.Style().lookup("TFrame", "background") or root.cget("bg")
+    except tk.TclError:
+        bg = root.cget("bg")
+    canvas = tk.Canvas(top, highlightthickness=0, borderwidth=0,
+                       background=bg, yscrollincrement=20)
+    vsb = ttk.Scrollbar(top, orient="vertical", command=canvas.yview)
+    canvas.configure(yscrollcommand=vsb.set)
+    vsb.pack(side="right", fill="y")
+    canvas.pack(side="left", fill="both", expand=True)
+    form = ttk.Frame(canvas)
+    form_id = canvas.create_window((0, 0), window=form, anchor="nw")
+
+    def _sync(_e=None):
+        # form spans the full canvas width; scroll region = form's full height
+        w = max(canvas.winfo_width(), form.winfo_reqwidth())
+        h = max(canvas.winfo_height(), form.winfo_reqheight())
+        canvas.itemconfigure(form_id, width=w)
+        canvas.configure(scrollregion=(0, 0, w, h))
+    form.bind("<Configure>", _sync)
+    canvas.bind("<Configure>", _sync)
+
+    # ---- bottom pane: terminal ----
+    term_frame = ttk.Frame(paned)
+    ttk.Label(term_frame,
+              text="Terminal   (drag the bar above up / down to resize)",
+              foreground="#555").pack(side="top", anchor="w", padx=6)
+
+    paned.add(top, minsize=60)
+    paned.add(term_frame, minsize=80)    # terminal gets extra room on resize
+
+    # ---- mouse wheel scrolls the control panel when the pointer is over it ----
+    def _scroll(e):
+        if form.winfo_reqheight() <= canvas.winfo_height():
+            return                                   # everything fits already
+        if e.num == 4:
+            step = -1
+        elif e.num == 5:
+            step = 1
+        elif e.delta:
+            step = -1 if e.delta > 0 else 1
+        else:
+            return
+        canvas.yview_scroll(step, "units")
+
+    def _over_panel(e):
+        try:
+            w = root.winfo_containing(e.x_root, e.y_root)
+        except (KeyError, tk.TclError):
+            return False
+        if w is None:
+            return False
+        p, t = str(w), str(top)
+        return p == t or p.startswith(t + ".")
+
+    def _wheel(e):
+        if _over_panel(e):
+            _scroll(e)
+
+    for seq in ("<MouseWheel>", "<Button-4>", "<Button-5>"):
+        root.bind_all(seq, _wheel, add="+")
+
+    def _guard_wheel(widget):
+        # Comboboxes / spinboxes change their value on mouse-wheel.  Inside a
+        # scrolling panel that would silently flip settings (e.g. the slip
+        # system) while the user is just scrolling, so scroll the panel instead.
+        for child in widget.winfo_children():
+            if child.winfo_class() in ("TCombobox", "TSpinbox", "Spinbox"):
+                for seq in ("<MouseWheel>", "<Button-4>", "<Button-5>"):
+                    child.bind(seq, lambda e: (_scroll(e), "break")[1])
+            _guard_wheel(child)
+
+    def finish():
+        _guard_wheel(form)
+        # Start the bar right under the controls, like the original layout:
+        # the controls get their natural height, the terminal gets the rest.
+        form.update_idletasks()
+        paned.paneconfigure(top, height=form.winfo_reqheight())
+
+    return form, term_frame, finish
+
 
 def run_gui():
     import tkinter as tk
@@ -121,6 +274,9 @@ def run_gui():
     root.attributes("-topmost", True)
     root.after(200, lambda: root.attributes("-topmost", False))
 
+    # controls go in a scrollable panel; the terminal sits below a draggable bar
+    form, term_frame, finish_layout = _split_layout(root, tk, ttk)
+
     pad = {"padx": 6, "pady": 3}
     vars_ = {}
 
@@ -130,7 +286,7 @@ def run_gui():
         return ttk.Entry(parent, textvariable=var, width=width)
 
     # ---------- 1. Slip system + alloy ----------
-    f1 = ttk.LabelFrame(root, text="1.  Slip system  &  alloy")
+    f1 = ttk.LabelFrame(form, text="1.  Slip system  &  alloy")
     f1.pack(fill="x", **pad)
 
     ttk.Label(f1, text="Slip system").grid(row=0, column=0, sticky="w", **pad)
@@ -221,7 +377,7 @@ def run_gui():
                                       sticky="w", **pad)
 
     # ---------- 2. How many / naming ----------
-    f2 = ttk.LabelFrame(root, text="2.  How many lattices  /  naming")
+    f2 = ttk.LabelFrame(form, text="2.  How many lattices  /  naming")
     f2.pack(fill="x", **pad)
 
     ttk.Label(f2, text="Number of lattices").grid(row=0, column=0, sticky="w", **pad)
@@ -255,7 +411,7 @@ def run_gui():
                ).grid(row=3, column=5, sticky="w", **pad)
 
     # ---------- 3. SFE data ----------
-    f3 = ttk.LabelFrame(root, text="3.  SFE data (CSV)")
+    f3 = ttk.LabelFrame(form, text="3.  SFE data (CSV)")
     f3.pack(fill="x", **pad)
     ttk.Label(f3, text="CSV").grid(row=0, column=0, sticky="w", **pad)
     entry(f3, "csv", 46).grid(row=0, column=1, columnspan=2, sticky="w", **pad)
@@ -279,9 +435,9 @@ def run_gui():
     vars_["slip"].trace_add("write", on_slip)
     on_slip()
 
-    # ---------- Controls + log ----------
-    f5 = ttk.Frame(root)
-    f5.pack(fill="both", expand=True, **pad)
+    # ---------- Controls ----------
+    f5 = ttk.Frame(form)
+    f5.pack(fill="x", **pad)
     btn = ttk.Button(f5, text="Generate USFE files")
     btn.grid(row=0, column=0, sticky="w", **pad)
     stop_btn = ttk.Button(f5, text="Stop", state="disabled")
@@ -296,11 +452,12 @@ def run_gui():
     status_var = tk.StringVar(value="Ready.")
     ttk.Label(f5, textvariable=status_var).grid(row=2, column=0, columnspan=3,
                                                 sticky="w", **pad)
-    log = ScrolledText(f5, height=14, state="disabled", wrap="none",
-                   font="TkFixedFont")
-    log.grid(row=3, column=0, columnspan=3, sticky="nsew", **pad)
-    f5.rowconfigure(3, weight=1)
     f5.columnconfigure(2, weight=1)
+
+    # ---------- Terminal (log), below the draggable bar ----------
+    log = ScrolledText(term_frame, height=14, state="disabled", wrap="none",
+                       font="TkFixedFont")
+    log.pack(fill="both", expand=True, **pad)
 
     def _pick_dir(var):
         d = filedialog.askdirectory()
@@ -386,7 +543,7 @@ def run_gui():
         log.configure(state="normal")
         log.delete("1.0", "end")
         log.configure(state="disabled")
-        append_log(pilot_banner.BANNER)
+        append_log(BANNER)
         prog["value"] = 0.0
         stop_event.clear()
         btn.configure(state="disabled")
@@ -405,6 +562,7 @@ def run_gui():
     stop_btn.configure(command=lambda: (stop_event.set(),
                                         status_var.set("Stopping after this step...")))
     view_btn.configure(command=on_view)
+    finish_layout()
     root.after(80, poll)
     root.mainloop()
 
@@ -459,7 +617,7 @@ def cli_main():
         return 1
 
     print()
-    print(pilot_banner.BANNER)
+    print(BANNER)
     core.build_lattices(
         cfg,
         log=print,

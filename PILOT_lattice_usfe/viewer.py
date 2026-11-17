@@ -75,6 +75,14 @@ SLIP_PLANES = {
 }
 LATTICE_TO_SLIP = {"BCC": "{110}", "CUSTOM_NON_ORTHO": "{112}"}
 
+# 2-D marker size, as a fraction of the nearest-neighbour spacing ON SCREEN
+# (1.0 = neighbouring markers just touch; smaller = more gap between them).
+# The fraction is held constant when the window is resized or the plot is
+# zoomed, so the gaps scale with the plot instead of opening up / closing.
+# Size is taken from plane 0 of the slip system ((110) / (211)) at the current
+# window size and applied to every plane and layer.
+MARKER_FILL = {"{110}": 0.95, "{112}": 0.9}
+
 # Plane-0 frames, kept for backward compatibility / standalone use.
 SLIP_FRAMES = {
     "{110}": (B_DIR.copy(), np.cross(np.array([1, 1, 0], float), B_DIR)),
@@ -195,6 +203,22 @@ def project(coords, x_dir, y_dir):
     return U, V, Wp, planes, labels
 
 
+def nn_spacing(U, V, n_sample=200, seed=0):
+    """Typical nearest-neighbour distance between 2-D points (data units):
+    the median, over a random sample of points, of each one's distance to its
+    closest neighbour.  Returns None if there are fewer than two points."""
+    P = np.column_stack([np.asarray(U, float), np.asarray(V, float)])
+    if len(P) < 2:
+        return None
+    rng = np.random.default_rng(seed)
+    idx = rng.choice(len(P), min(n_sample, len(P)), replace=False)
+    d2 = ((P[idx, None, :] - P[None, :, :]) ** 2).sum(-1)
+    d2[d2 < 1e-18] = np.inf                       # ignore the point itself
+    nn = np.sqrt(d2.min(axis=1))
+    nn = nn[np.isfinite(nn)]
+    return float(np.median(nn)) if len(nn) else None
+
+
 def frame_for(system, idx):
     """(x_dir, y_dir) for slip plane `idx` of `system`: x = b = [-111],
     y = normal x b, so the viewing direction is the plane normal."""
@@ -228,7 +252,8 @@ def run_viewer(master=None, folder=".", slip="{110}",
 
     state = {"coords": None, "elems": None, "comp": None, "comp_cols": None,
              "usfe_by_l": None, "cell": None, "2d": None, "3d": None,
-             "loaded": False, "hover3d": None}
+             "loaded": False, "hover3d": None, "sizer": None, "ref": None,
+             "view": None}
 
     pad = {"padx": 5, "pady": 2}
     left = ttk.Frame(win)
@@ -372,6 +397,19 @@ def run_viewer(master=None, folder=".", slip="{110}",
     plane_scale.pack(fill="x", **pad)
     plane_lbl = ttk.Label(twod, text="plane 0")
     plane_lbl.pack(anchor="w", **pad)
+    zf = ttk.Frame(twod)
+    zf.pack(fill="x", **pad)
+    ttk.Button(zf, text="Zoom in", command=lambda: zoom_center(1 / 1.5)).pack(
+        side="left", expand=True, fill="x")
+    ttk.Button(zf, text="Zoom out", command=lambda: zoom_center(1.5)).pack(
+        side="left", expand=True, fill="x")
+    ttk.Button(zf, text="Reset", command=lambda: zoom_reset()).pack(
+        side="left", expand=True, fill="x")
+    ttk.Label(twod, text="Mouse wheel over the plot zooms in/out around the "
+                         "cursor; click and drag the plot to move around; the "
+                         "toolbar magnifier zooms to a dragged box. The view is "
+                         "kept when you change layer.",
+              foreground="#555", wraplength=250).pack(anchor="w", **pad)
 
     # ---- 3-D controls ----
     threed = ttk.LabelFrame(left, text="3-D view")
@@ -403,11 +441,25 @@ def run_viewer(master=None, folder=".", slip="{110}",
         xd, yd = frame_for(v["slip"].get(), idx)
         return project(state["coords"], xd, yd)
 
+    def _reference_plane():
+        """Marker-size reference: a full layer of plane 0 of the slip system,
+        i.e. (110) for {110} and (211) for {112}.  Every layer of every plane
+        is sized as if viewing this layer at the current window size, so
+        markers do not change size when stepping through layers whose cross
+        section (and hence the auto-zoom) differs, e.g. (01-1) or (-1-21)."""
+        U, V, Wp, planes, _ = state["3d"]
+        m = np.abs(Wp - planes[len(planes) // 2]) <= 0.05
+        nn = nn_spacing(U[m], V[m])
+        if not nn:
+            return None
+        return dict(nn=nn, span=(float(np.ptp(U[m])), float(np.ptp(V[m]))))
+
     def reproject():
         """2-D uses the selected plane's frame; 3-D uses a fixed per-system frame
         (plane 0), so switching the USFE index never reorients the 3-D cell."""
         state["2d"] = _project_for(cur_l())
         state["3d"] = _project_for(0)
+        state["ref"] = _reference_plane()
         planes = state["2d"][3]
         plane_scale.configure(to=max(len(planes) - 1, 1))
         if v["plane_idx"].get() > len(planes) - 1:
@@ -451,7 +503,9 @@ def run_viewer(master=None, folder=".", slip="{110}",
                 cols = [f"col{c}" for c in range(ncols)]
 
             state.update(coords=coords, elems=elems, comp=comp, comp_cols=cols,
-                         usfe_by_l=usfe_by_l, cell=cell, loaded=True)
+                         usfe_by_l=usfe_by_l, cell=cell, loaded=True,
+                         **{"2d": None, "3d": None, "ref": None,
+                            "sizer": None, "view": None})   # fresh view
 
             color_box["values"] = cols
             if v["color_elem"].get() not in cols:
@@ -553,8 +607,8 @@ def run_viewer(master=None, folder=".", slip="{110}",
         ax.format_coord = fmt
 
     def draw(full=True):
-        if not state["loaded"]:
-            return
+        if not state["loaded"] or state["2d"] is None:
+            return                     # (load() can trigger a redraw early)
         mode = v["mode"].get()
         plane_tex = cur_plane_tex()
         l = cur_l()
@@ -566,15 +620,23 @@ def run_viewer(master=None, folder=".", slip="{110}",
             canvas.draw_idle()
             return
 
+        _remember_view()
         fig.clear()
         fig._is3d = is3d
+        try:
+            toolbar.update()          # forget Home/Back history of old axes
+        except Exception:             # noqa: BLE001
+            pass
         # markers shrink for larger lattices so points do not overlap:
-        # diameter ~ 32/N (half at 64, quarter at 128); s (area) ~ (32/N)^2
+        # diameter ~ 32/N (half at 64, quarter at 128); s (area) ~ (32/N)^2.
+        # (3-D uses s3d directly; 2-D starts at s2d and is then resized by
+        #  _rescale_markers from the on-screen atom spacing.)
         _N = max(state["cell"])
         _sd = min(1.5, 32.0 / _N)
         s2d = max(4.0, 80.0 * _sd * _sd)
         s3d = max(2.0, 25.0 * _sd * _sd)
         state["hover3d"] = None
+        state["sizer"] = None
 
         if not is3d:
             U, V, Wp, planes, labels = state["2d"]
@@ -593,8 +655,8 @@ def run_viewer(master=None, folder=".", slip="{110}",
                     ax = fig.add_subplot(gs[0])
                     triax = fig.add_subplot(gs[1])
                     rgb = np.clip(state["comp"][:, :3], 0, 1)
-                    ax.scatter(U[mask], V[mask], c=rgb[mask], s=s2d, marker="H",
-                               edgecolors="k", linewidths=0.3)
+                    sc = ax.scatter(U[mask], V[mask], c=rgb[mask], s=s2d,
+                                    marker="H", edgecolors="k", linewidths=0.3)
                     _draw_triangle_legend(triax, cols)
                     _set_hover(ax, labels, U[mask], V[mask],
                                np.nonzero(mask)[0])
@@ -629,6 +691,44 @@ def run_viewer(master=None, folder=".", slip="{110}",
             ax.set_aspect("equal")
             ax.set_xlabel(labels[0])
             ax.set_ylabel(labels[1])
+            # size markers from the reference plane's on-screen atom spacing
+            # (see _reference_plane), and keep doing so on resize / zoom
+            ref = state.get("ref")
+            if ref is None:                      # fall back to this layer
+                nn = nn_spacing(U[mask], V[mask])
+                ref = dict(nn=nn, span=(float(np.ptp(U[mask])),
+                                        float(np.ptp(V[mask])))) if nn else None
+            mx, my = ax.margins()
+            x0, x1 = ax.get_xlim()               # this layer's auto-zoomed view
+            y0, y1 = ax.get_ylim()
+            auto_lims = ((x0, x1), (y0, y1))
+            auto_span = (abs(x1 - x0), abs(y1 - y0))
+            key = (v["slip"].get(), l)           # zoom is kept per slip plane
+            view = state.get("view")
+            restore = view if (view and view["key"] == key) else None
+            state["sizer"] = dict(
+                ax=ax, sc=sc, key=key, auto_lims=auto_lims, auto_span=auto_span,
+                # zoom level is measured against the view the zoom started from
+                home_span=restore["home_span"] if restore else auto_span,
+                nn=ref["nn"] if ref else None,
+                ref_span=((ref["span"][0] * (1 + 2 * mx),
+                           ref["span"][1] * (1 + 2 * my)) if ref else None),
+                fill=MARKER_FILL.get(v["slip"].get(), 0.9))
+            ax.callbacks.connect("xlim_changed", _rescale_markers)
+            ax.callbacks.connect("ylim_changed", _rescale_markers)
+            if restore:
+                # Home on the toolbar = this whole layer; Back = the kept zoom
+                try:
+                    toolbar.push_current()
+                except Exception:                # noqa: BLE001
+                    pass
+                ax.set_xlim(*restore["lims"][0])
+                ax.set_ylim(*restore["lims"][1])
+                try:
+                    toolbar.push_current()
+                except Exception:                # noqa: BLE001
+                    pass
+            _rescale_markers()
         else:
             U, V, Wp, planes, labels = state["3d"]     # fixed per-system frame
             f = float(v["subsample"].get())
@@ -667,6 +767,184 @@ def run_viewer(master=None, folder=".", slip="{110}",
                     gidx=np.nonzero(m)[0], atom=False)
             ax.view_init(elev=v["elev"].get(), azim=v["azim"].get())
         canvas.draw_idle()
+
+    def _rescale_markers(*_):
+        """Set the 2-D marker size to MARKER_FILL of the nearest-neighbour
+        spacing the REFERENCE plane ((110) / (211)) would have on screen at the
+        current window size, times any toolbar zoom relative to this layer's
+        default view.  Called after every 2-D draw and whenever the window is
+        resized or the view is zoomed/panned."""
+        sz = state.get("sizer")
+        if not sz or not sz.get("nn") or getattr(fig, "_is3d", False):
+            return
+        ax = sz["ax"]
+        if _same_lims((ax.get_xlim(), ax.get_ylim()), sz["auto_lims"]):
+            sz["home_span"] = sz["auto_span"]     # back at this layer's own view
+        try:
+            # axes box (pixels) before the equal-aspect shrink; with equal
+            # aspect the scale is pixels-per-angstrom = min(box_w/dx, box_h/dy)
+            box = ax.get_position(original=True)
+            bw = box.width * fig.bbox.width
+            bh = box.height * fig.bbox.height
+
+            def ppa(span):
+                return min(bw / max(span[0], 1e-12), bh / max(span[1], 1e-12))
+            x0, x1 = ax.get_xlim()
+            y0, y1 = ax.get_ylim()
+            zoom = ppa((abs(x1 - x0), abs(y1 - y0))) / ppa(sz["home_span"])
+            nn_px = sz["nn"] * ppa(sz["ref_span"]) * zoom
+        except Exception:                         # noqa: BLE001
+            return
+        d_pt = max(1.0, sz["fill"] * nn_px * 72.0 / fig.dpi)  # pixels -> points
+        sz["sc"].set_sizes([d_pt * d_pt])         # scatter size is points^2
+
+    # ---- 2-D zoom ----
+    def _same_lims(a, b, tol=1e-6):
+        (ax0, ax1), (ay0, ay1) = a
+        (bx0, bx1), (by0, by1) = b
+        sx = max(abs(bx1 - bx0), 1e-12)
+        sy = max(abs(by1 - by0), 1e-12)
+        return (abs(ax0 - bx0) <= tol * sx and abs(ax1 - bx1) <= tol * sx and
+                abs(ay0 - by0) <= tol * sy and abs(ay1 - by1) <= tol * sy)
+
+    def _remember_view():
+        """Before a redraw, remember the current 2-D zoom/pan (if any) so it is
+        kept when only the layer or colouring changes on the same slip plane."""
+        sz = state.get("sizer")
+        if not sz:
+            return
+        ax = sz["ax"]
+        lims = (ax.get_xlim(), ax.get_ylim())
+        if _same_lims(lims, sz["auto_lims"]):
+            state["view"] = None
+        else:
+            state["view"] = dict(key=sz["key"], lims=lims,
+                                 home_span=sz["home_span"])
+
+    def _zoom_about(cx, cy, factor):
+        """factor < 1 zooms in, > 1 zooms out; (cx, cy) stays put on screen.
+        Zooming out stops at the layer's full (auto) view."""
+        sz = state.get("sizer")
+        if not sz or getattr(fig, "_is3d", False):
+            return
+        ax = sz["ax"]
+        (x0, x1), (y0, y1) = ax.get_xlim(), ax.get_ylim()
+        nx = (cx - (cx - x0) * factor, cx + (x1 - cx) * factor)
+        ny = (cy - (cy - y0) * factor, cy + (y1 - cy) * factor)
+        if factor > 1 and (abs(nx[1] - nx[0]) >= sz["auto_span"][0] or
+                           abs(ny[1] - ny[0]) >= sz["auto_span"][1]):
+            nx, ny = sz["auto_lims"]
+        try:
+            if toolbar._nav_stack() is None:  # so Home/Back work afterwards
+                toolbar.push_current()
+        except Exception:                     # noqa: BLE001
+            pass
+        ax.set_xlim(*nx)
+        ax.set_ylim(*ny)
+        try:
+            toolbar.push_current()
+        except Exception:                     # noqa: BLE001
+            pass
+        canvas.draw_idle()
+
+    def zoom_center(factor):
+        sz = state.get("sizer")
+        if not sz or getattr(fig, "_is3d", False):
+            return
+        (x0, x1), (y0, y1) = sz["ax"].get_xlim(), sz["ax"].get_ylim()
+        _zoom_about(0.5 * (x0 + x1), 0.5 * (y0 + y1), factor)
+
+    def zoom_reset():
+        state["view"] = None
+        sz = state.get("sizer")
+        if not sz or getattr(fig, "_is3d", False):
+            return
+        _zoom_about(0.0, 0.0, 1e9)            # zoom fully out = auto view
+
+    def _on_scroll(event):
+        sz = state.get("sizer")
+        if (not sz or getattr(fig, "_is3d", False) or event.inaxes is not sz["ax"]
+                or event.xdata is None):
+            return
+        _zoom_about(event.xdata, event.ydata,
+                    1 / 1.25 if event.button == "up" else 1.25)
+
+    canvas.mpl_connect("scroll_event", _on_scroll)
+
+    # ---- 2-D click-and-drag panning (no toolbar tool needed) ----
+    drag = {}
+
+    def _toolbar_tool_active():
+        return bool(str(getattr(toolbar, "mode", "")))  # pan / zoom-box selected
+
+    def _set_cursor(name):
+        try:
+            canvas.get_tk_widget().configure(cursor=name)
+        except Exception:                     # noqa: BLE001
+            pass
+
+    def _on_press(event):
+        sz = state.get("sizer")
+        if (not sz or getattr(fig, "_is3d", False) or event.inaxes is not sz["ax"]
+                or event.button != 1 or _toolbar_tool_active()):
+            return
+        ax = sz["ax"]
+        drag.update(ax=ax, x=event.x, y=event.y, moved=False,
+                    xlim=ax.get_xlim(), ylim=ax.get_ylim(),
+                    inv=ax.transData.inverted())
+        try:
+            if toolbar._nav_stack() is None:  # so Home/Back work afterwards
+                toolbar.push_current()
+        except Exception:                     # noqa: BLE001
+            pass
+
+    def _on_drag(event):
+        if not drag or event.x is None or event.y is None:
+            return
+        sz = state.get("sizer")
+        if not sz or sz["ax"] is not drag["ax"]:
+            drag.clear()
+            return
+        if not drag["moved"]:
+            if abs(event.x - drag["x"]) + abs(event.y - drag["y"]) < 3:
+                return                        # ignore tiny jitter on a click
+            drag["moved"] = True
+            _set_cursor("fleur")
+        # pixel motion -> data motion, using the view from when the drag began
+        (sx, sy), (cx, cy) = drag["inv"].transform(
+            [[drag["x"], drag["y"]], [event.x, event.y]])
+        dx, dy = cx - sx, cy - sy
+        (x0, x1), (y0, y1) = drag["xlim"], drag["ylim"]
+        nx0, nx1, ny0, ny1 = x0 - dx, x1 - dx, y0 - dy, y1 - dy
+        # keep the view's centre inside the layer, so it can't be lost off-screen
+        (ax0, ax1), (ay0, ay1) = sz["auto_lims"]
+        mcx = min(max(0.5 * (nx0 + nx1), min(ax0, ax1)), max(ax0, ax1))
+        mcy = min(max(0.5 * (ny0 + ny1), min(ay0, ay1)), max(ay0, ay1))
+        sx_, sy_ = mcx - 0.5 * (nx0 + nx1), mcy - 0.5 * (ny0 + ny1)
+        drag["ax"].set_xlim(nx0 + sx_, nx1 + sx_)
+        drag["ax"].set_ylim(ny0 + sy_, ny1 + sy_)
+        canvas.draw_idle()
+
+    def _on_release(event):
+        if not drag:
+            return
+        if drag.get("moved"):
+            _set_cursor("")
+            try:
+                toolbar.push_current()        # Back undoes the drag
+            except Exception:                 # noqa: BLE001
+                pass
+        drag.clear()
+
+    canvas.mpl_connect("button_press_event", _on_press)
+    canvas.mpl_connect("motion_notify_event", _on_drag)
+    canvas.mpl_connect("button_release_event", _on_release)
+
+    def _on_resize(_event):
+        _rescale_markers()
+        canvas.draw_idle()
+
+    canvas.mpl_connect("resize_event", _on_resize)
 
     def _on_motion_3d(event):
         """3-D hover: report the nearest plotted site's value + (i,j,k) + xyz."""

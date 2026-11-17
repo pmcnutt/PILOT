@@ -23,6 +23,10 @@ so the working directory stays uncluttered.  From here you can:
 
 The heavy compute (PFDD) runs on the cluster via the SLURM array in slurm/; this
 tool prepares its inputs and interprets its results.
+
+The PILOT banner is built into this file (no separate pilot_banner.py needed).
+In the window, drag the bar above the terminal up to enlarge the terminal, or
+down to shrink it; the controls above it scroll when they don't all fit.
 """
 
 import json
@@ -32,7 +36,49 @@ import sys
 import threading
 
 import crss_core as cc
-import pilot_banner
+
+# --------------------------- PILOT banner --------------------------------
+# (Previously lived in pilot_banner.py; embedded here so the GUI is one file.)
+
+BANNER = r"""----------------------------------------------------------------------
+
+                                 /||\
+                                / -- \
+                               /      \
+                               |  ::  |
+                               |  __  |
+                               | /  \ |
+     ____________________ _|_  | |  | |  _|_ ____________________
+    /--------------------/   \----------/   \--------------------\
+    |                    |   |          |   |                    |
+    |     :              |   |    ::    |   |            :       |
+    |_______________ ___ \   /          \   / ___ _______________|
+     \_____________|___|__| |____________| |__|___|_____________/
+                          | |  |  ||  |  | |
+                               |  ||  |
+                               |      |
+                               / \  / \
+                             -(   )(   )-
+                               \ /  \ /
+                                \    /
+                           _____/ || \_____
+                          / :    \||/    : \
+                          | ____  ||  ____ |
+                           \___|__||__|___/
+                                  ||
+
+     ____           ___          _               ___           _____
+    |  _ \         |_ _|        | |             / _ \         |_   _|
+    | |_) |         | |         | |            | | | |          | |
+    |  __/          | |         | |            | | | |          | |
+    | |             | |         | |___         | |_| |          | |
+    |_|            |___|        |_____|         \___/           |_|
+
+Phase-field dislocation dynamics Input, Lattice & Optimization Toolkit
+
+                      Stress State Optimization
+----------------------------------------------------------------------"""
+
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 STUDIES = os.path.join(HERE, "studies")
@@ -65,6 +111,114 @@ def save_prefs(d):
         pass
 
 
+# ------------------- resizable terminal + scrollable panel -----------------
+
+def _split_layout(root, tk, ttk):
+    """Split the window into a scrollable control panel (top) and the
+    terminal (bottom), with a draggable bar between them.
+
+        drag the bar UP    -> bigger terminal
+        drag the bar DOWN  -> smaller terminal
+
+    The control panel has its own vertical scrollbar (and mouse-wheel
+    scrolling), so nothing is lost when the terminal takes up more room.
+
+    Returns (form, term_frame, finish):
+        form        -- put the controls in here
+        term_frame  -- put the terminal (log) in here
+        finish()    -- call once every widget exists; sets the starting bar
+                       position and the mouse-wheel routing.
+    """
+    paned = tk.PanedWindow(root, orient="vertical", sashwidth=10,
+                           sashrelief="raised", sashpad=1, borderwidth=0,
+                           showhandle=False, handlesize=10, handlepad=40,
+                           opaqueresize=True, sashcursor="sb_v_double_arrow")
+    paned.pack(fill="both", expand=True)
+
+    # ---- top pane: scrollable control panel ----
+    top = ttk.Frame(paned)
+    try:
+        bg = ttk.Style().lookup("TFrame", "background") or root.cget("bg")
+    except tk.TclError:
+        bg = root.cget("bg")
+    canvas = tk.Canvas(top, highlightthickness=0, borderwidth=0,
+                       background=bg, yscrollincrement=20)
+    vsb = ttk.Scrollbar(top, orient="vertical", command=canvas.yview)
+    canvas.configure(yscrollcommand=vsb.set)
+    vsb.pack(side="right", fill="y")
+    canvas.pack(side="left", fill="both", expand=True)
+    form = ttk.Frame(canvas)
+    form_id = canvas.create_window((0, 0), window=form, anchor="nw")
+
+    def _sync(_e=None):
+        # form spans the full canvas width; scroll region = form's full height
+        w = max(canvas.winfo_width(), form.winfo_reqwidth())
+        h = max(canvas.winfo_height(), form.winfo_reqheight())
+        canvas.itemconfigure(form_id, width=w)
+        canvas.configure(scrollregion=(0, 0, w, h))
+    form.bind("<Configure>", _sync)
+    canvas.bind("<Configure>", _sync)
+
+    # ---- bottom pane: terminal ----
+    term_frame = ttk.Frame(paned)
+    ttk.Label(term_frame,
+              text="Terminal   (drag the bar above up / down to resize)",
+              foreground="#555").pack(side="top", anchor="w", padx=6)
+
+    paned.add(top, minsize=60)
+    paned.add(term_frame, minsize=80)    # terminal gets extra room on resize
+
+    # ---- mouse wheel scrolls the control panel when the pointer is over it ----
+    def _scroll(e):
+        if form.winfo_reqheight() <= canvas.winfo_height():
+            return                                   # everything fits already
+        if e.num == 4:
+            step = -1
+        elif e.num == 5:
+            step = 1
+        elif e.delta:
+            step = -1 if e.delta > 0 else 1
+        else:
+            return
+        canvas.yview_scroll(step, "units")
+
+    def _over_panel(e):
+        try:
+            w = root.winfo_containing(e.x_root, e.y_root)
+        except (KeyError, tk.TclError):
+            return False
+        if w is None:
+            return False
+        p, t = str(w), str(top)
+        return p == t or p.startswith(t + ".")
+
+    def _wheel(e):
+        if _over_panel(e):
+            _scroll(e)
+
+    for seq in ("<MouseWheel>", "<Button-4>", "<Button-5>"):
+        root.bind_all(seq, _wheel, add="+")
+
+    def _guard_wheel(widget):
+        # Comboboxes / spinboxes change their value on mouse-wheel.  Inside a
+        # scrolling panel that would silently flip settings (e.g. the slip
+        # system) while the user is just scrolling, so scroll the panel instead.
+        for child in widget.winfo_children():
+            if child.winfo_class() in ("TCombobox", "TSpinbox", "Spinbox"):
+                for seq in ("<MouseWheel>", "<Button-4>", "<Button-5>"):
+                    child.bind(seq, lambda e: (_scroll(e), "break")[1])
+            _guard_wheel(child)
+
+    def finish():
+        _guard_wheel(form)
+        # Start the bar right under the controls, like the original layout:
+        # the controls get their natural height, the terminal gets the rest.
+        form.update_idletasks()
+        paned.paneconfigure(top, height=form.winfo_reqheight())
+
+    return form, term_frame, finish
+
+
 def run_gui():
     import tkinter as tk
     from tkinter import ttk, filedialog, messagebox, simpledialog
@@ -77,6 +231,9 @@ def run_gui():
     root.attributes("-topmost", True)
     root.after(200, lambda: root.attributes("-topmost", False))
 
+    # controls go in a scrollable panel; the terminal sits below a draggable bar
+    form, term_frame, finish_layout = _split_layout(root, tk, ttk)
+
     pad = {"padx": 6, "pady": 3}
     V = {}
 
@@ -84,7 +241,7 @@ def run_gui():
         V[key] = tk.StringVar(value=str(val)); return V[key]
 
     # ---------- 1. Study & slip system ----------
-    f1 = ttk.LabelFrame(root, text="1.  Study & slip system")
+    f1 = ttk.LabelFrame(form, text="1.  Study & slip system")
     f1.pack(fill="x", **pad)
     ttk.Label(f1, text="Study name").grid(row=0, column=0, sticky="w", **pad)
     ttk.Entry(f1, textvariable=sv("study", "study1"), width=22).grid(
@@ -101,7 +258,7 @@ def run_gui():
         row=1, column=2, columnspan=2, sticky="w", **pad)
 
     # ---------- 2. Temperatures ----------
-    f2 = ttk.LabelFrame(root, text="2.  Temperatures (K)")
+    f2 = ttk.LabelFrame(form, text="2.  Temperatures (K)")
     f2.pack(fill="x", **pad)
     for i, (key, lab, dflt) in enumerate([("t_min", "min", 0), ("t_max", "max", 1400),
                                           ("t_step", "step", 100)]):
@@ -110,7 +267,7 @@ def run_gui():
             row=0, column=2 * i + 1, sticky="w", **pad)
 
     # ---------- 3. Initial stress bracket ----------
-    f3 = ttk.LabelFrame(root, text="3.  Initial stress bracket for binary search")
+    f3 = ttk.LabelFrame(form, text="3.  Initial stress bracket for binary search")
     f3.pack(fill="x", **pad)
     grid3 = [("tau_lo", "bracket lo (mu)", 0.0), ("tau_hi", "bracket hi (mu)", 0.08),
              ("n_rounds", "# of search rounds", 6),
@@ -144,7 +301,7 @@ def run_gui():
                                       sticky="w", **pad)
 
     # ---------- 4. Stress state ----------
-    f4 = ttk.LabelFrame(root, text="4.  Stress state")
+    f4 = ttk.LabelFrame(form, text="4.  Stress state")
     f4.pack(fill="x", **pad)
     V["mode"] = tk.StringVar(value="shear")
     ttk.Radiobutton(f4, text="Shear couple (MRSSP)", value="shear",
@@ -162,7 +319,7 @@ def run_gui():
                                                    sticky="w", **pad)
 
     # ---------- 5. Alloy USFE link ----------
-    f5 = ttk.LabelFrame(root, text="5.  Alloy USFE link  (per-temperature USFE "
+    f5 = ttk.LabelFrame(form, text="5.  Alloy USFE link  (per-temperature USFE "
                                    "file written into each cases-file line)")
     f5.pack(fill="x", **pad)
     ttk.Label(f5, text="Names each temperature's USFE file (from the PILOT "
@@ -185,7 +342,7 @@ def run_gui():
                command=lambda: check_usfe()).grid(row=1, column=3, **pad)
 
     # ---------- cluster / dumps ----------
-    f6 = ttk.LabelFrame(root, text="6.  Cluster output (for dump paths & fetch)")
+    f6 = ttk.LabelFrame(form, text="6.  Cluster output (for dump paths & fetch)")
     f6.pack(fill="x", **pad)
     ttk.Label(f6, text="cluster dump base").grid(row=0, column=0, sticky="w", **pad)
     ttk.Entry(f6, textvariable=sv("out_base", "OUTPUT/dumps"), width=40).grid(
@@ -194,12 +351,12 @@ def run_gui():
     V["dumps_name"] = tk.StringVar(value="dumps_local")
 
     # ---------- Initialize (its own full-width button, above the actions) ----------
-    ttk.Button(root, text="Initialize binary CRSS search",
+    ttk.Button(form, text="Initialize binary CRSS search",
                command=lambda: do(cc.init, force_confirm=True)).pack(
         fill="x", ipady=10, **pad)
 
     # ---------- Binary Search Actions ----------
-    fa = ttk.LabelFrame(root, text="Binary Search Actions")
+    fa = ttk.LabelFrame(form, text="Binary Search Actions")
     fa.pack(fill="x", **pad)
     btns = [("Generate new round", lambda: do(cc.generate)),
             ("Update round (grade)...", lambda: open_update()),
@@ -216,11 +373,11 @@ def run_gui():
     fa.columnconfigure(1, weight=1)
 
     # ---------- Plot (its own full-width button, below the actions) ----------
-    ttk.Button(root, text="Plot CRSS vs T",
+    ttk.Button(form, text="Plot CRSS vs T",
                command=lambda: plot_crss()).pack(fill="x", ipady=10, **pad)
 
-    # ---------- Log ----------
-    log = ScrolledText(root, height=15, state="disabled", wrap="word",
+    # ---------- Terminal (log), below the draggable bar ----------
+    log = ScrolledText(term_frame, height=15, state="disabled", wrap="word",
                        font="TkFixedFont")
     log.pack(fill="both", expand=True, **pad)
 
@@ -607,11 +764,12 @@ def run_gui():
             messagebox.showerror("Plot", str(e))
 
     # banner + welcome
-    append(pilot_banner.BANNER)
+    append(BANNER)
     append("\nStress-state workflow ready. Study folder: " + STUDIES)
     append("Typical flow: set parameters -> Init -> Generate -> (run jobs) -> "
            "Fetch dumps -> Update -> repeat; Extend if needed; Plot CRSS vs T.")
 
+    finish_layout()
     root.mainloop()
 
 

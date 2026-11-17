@@ -150,7 +150,7 @@ def run_mrssp(master=None, on_apply=None, init=None):
     init = init or {}
     win = tk.Toplevel(master) if master is not None else tk.Tk()
     win.title("PILOT  -  stress state / MRSSP explorer")
-    win.geometry("1080x720")
+    win.geometry("1320x720")
 
     v = {
         "mode": tk.StringVar(value=init.get("mode", "shear")),
@@ -275,7 +275,7 @@ def run_mrssp(master=None, on_apply=None, init=None):
 
         fig.clear()
         ax_p = fig.add_axes([0.02, 0.30, 0.46, 0.66])   # polar-style view
-        ax_b = fig.add_axes([0.58, 0.30, 0.40, 0.60])   # bars
+        ax_b = fig.add_axes([0.58, 0.30, 0.36, 0.60])   # bars
 
         # ---- view down b ----
         ax_p.set_aspect("equal"); ax_p.axis("off")
